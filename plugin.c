@@ -23,6 +23,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <inttypes.h>
+#include <math.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -32,6 +34,14 @@
 
 OBS_DECLARE_MODULE()
 
+#define ST_PLUGIN_VERSION "capture-health-v1"
+#ifdef _WIN32
+#define ST_PLATFORM "windows"
+#elif defined(__APPLE__)
+#define ST_PLATFORM "macos"
+#else
+#define ST_PLATFORM "linux"
+#endif
 #define ST_QUEUE_MAX 256 /* ~30s of 120ms chunks — drop oldest beyond this */
 
 struct st_chunk {
@@ -52,6 +62,15 @@ struct st_filter {
 	bool muted_now;
 	int  audio_chunks_captured;
 	int  audio_chunks_sent;
+	char filter_id[48];
+	uint64_t callbacks, input_frames, last_callback_ns, last_send_ns;
+	uint64_t written_bytes, write_errors, resample_errors, queue_drops, reconnects;
+	double left_peak, right_peak;
+	uint64_t diagnostic_sequence, last_health_ns;
+	char health_ring[16][2048];
+	unsigned health_read, health_count;
+	bool conflict_paused;
+
 
 	/* audio conversion */
 	audio_resampler_t *resampler;
@@ -63,6 +82,7 @@ struct st_filter {
 	volatile bool connected;
 	struct lws_context *lws_ctx;
 	struct lws *wsi;
+    lws_sorted_usec_list_t service_pulse;
 
 	/* outbound queue (audio thread -> ws thread) */
 	pthread_mutex_t qlock;
@@ -87,6 +107,35 @@ static void st_set_status(struct st_filter *f, const char *fmt, ...)
 		}
 		obs_source_update_properties(f->context);
 	}
+}
+
+/* Numeric metadata only; this bounded ring survives network interruptions.
+ * OBS's own log also keeps the snapshots when the transport cannot upload. */
+static void st_health_snapshot(struct st_filter *f)
+{
+    uint64_t now=os_gettime_ns();
+    if (f->last_health_ns && now-f->last_health_ns<15000000000ULL) return;
+    f->last_health_ns=now;
+    obs_source_t *parent=obs_filter_get_parent(f->context);
+    bool muted=parent && obs_source_muted(parent);
+    bool enabled=obs_source_enabled(f->context);
+    bool active=parent && obs_source_active(parent);
+    if(f->health_count==16){f->health_read=(f->health_read+1)%16;f->health_count--;}
+    unsigned slot=(f->health_read+f->health_count)%16;
+    pthread_mutex_lock(&f->qlock);
+    snprintf(f->health_ring[slot],sizeof(f->health_ring[slot]),
+      "{\"type\":\"audio_health\",\"plugin_version\":\"%s\",\"filter_id\":\"%s\",\"obs_version\":\"%s\",\"platform\":\"%s\",\"uptime_ms\":%" PRIu64 ",\"sequence\":%" PRIu64
+      ",\"callbacks\":%" PRIu64 ",\"frames\":%" PRIu64 ",\"captured\":%d,\"sent\":%d,\"written_bytes\":%" PRIu64
+      ",\"write_errors\":%" PRIu64 ",\"resample_errors\":%" PRIu64 ",\"queue_drops\":%" PRIu64 ",\"queue_depth\":%d"
+      ",\"last_callback_age_ms\":%" PRIu64 ",\"last_send_age_ms\":%" PRIu64 ",\"sample_rate\":%u,\"reconnects\":%" PRIu64
+      ",\"left_peak\":%.6f,\"right_peak\":%.6f,\"muted\":%s,\"enabled\":%s,\"source_active\":%s,\"connected\":%s}",
+      ST_PLUGIN_VERSION,f->filter_id,obs_get_version_string(),ST_PLATFORM,now/1000000,++f->diagnostic_sequence,f->callbacks,f->input_frames,f->audio_chunks_captured,f->audio_chunks_sent,f->written_bytes,
+      f->write_errors,f->resample_errors,f->queue_drops,f->qcount,
+      f->last_callback_ns?(now-f->last_callback_ns)/1000000:0,f->last_send_ns?(now-f->last_send_ns)/1000000:0,f->sample_rate,f->reconnects,
+      f->left_peak,f->right_peak,muted?"true":"false",enabled?"true":"false",active?"true":"false",f->connected?"true":"false");
+    pthread_mutex_unlock(&f->qlock);
+    blog(LOG_INFO,"[streamtranslate-health] %s",f->health_ring[slot]);
+    f->health_count++;
 }
 
 /* ---------------- queue ---------------- */
@@ -127,6 +176,7 @@ static void st_queue_push(struct st_filter *f, const unsigned char *data, size_t
 		if (!f->qhead)
 			f->qtail = NULL;
 		f->qcount--;
+		f->queue_drops++;
 		free(old->buf);
 		free(old);
 	}
@@ -169,17 +219,38 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
 		st_set_status(f, "Connected to %s - streaming audio", f->server);
 		f->connected = true;
+		f->last_health_ns=0;
+		st_health_snapshot(f);
 		lws_callback_on_writable(wsi);
 		break;
 
 	case LWS_CALLBACK_CLIENT_WRITEABLE: {
-		struct st_chunk *c = st_queue_pop(f);
+        if(f->health_count){
+            unsigned char payload[LWS_PRE+2048];
+            const char *text=f->health_ring[f->health_read];size_t size=strlen(text);
+            memcpy(payload+LWS_PRE,text,size);
+            int wrote=lws_write(wsi,payload+LWS_PRE,size,LWS_WRITE_TEXT);
+            if(wrote!=(int)size)return -1;
+            f->health_read=(f->health_read+1)%16;f->health_count--;
+            lws_callback_on_writable(wsi);return 0;
+        }
+
+		obs_source_t *parent = obs_filter_get_parent(f->context);
+        if (!obs_source_enabled(f->context) || (parent && obs_source_muted(parent))) {
+            st_queue_clear(f);
+            return 0;
+        }
+        struct st_chunk *c = st_queue_pop(f);
 		if (c) {
 			int wrote = lws_write(wsi, c->buf + LWS_PRE, c->len, LWS_WRITE_BINARY);
-			if (wrote > 0)
-				f->audio_chunks_sent++;
+            pthread_mutex_lock(&f->qlock);
+            if(wrote==(int)c->len){f->audio_chunks_sent++;f->written_bytes+=wrote;f->last_send_ns=os_gettime_ns();}
+            else f->write_errors++;
+            pthread_mutex_unlock(&f->qlock);
+            bool write_failed=wrote!=(int)c->len;
 			free(c->buf);
 			free(c);
+            if(write_failed)return -1;
 			lws_callback_on_writable(wsi);
 		}
 		break;
@@ -197,8 +268,14 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		f->wsi = NULL;
 		break;
 
+    case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
+        if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1];
+            if(code==4001 || code==4009){f->conflict_paused=true;st_set_status(f,"Another audio source is active. Reconnect only to switch back to this filter.");}
+        }
+        break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
-		st_set_status(f, "Disconnected from %s - reconnecting", f->server);
+        st_queue_clear(f);
+        if(!f->conflict_paused) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
 		break;
@@ -224,8 +301,9 @@ static void st_connect(struct st_filter *f)
 	}
 
 	char path[512];
-	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u",
-		 f->plugin_key, f->sample_rate);
+	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&transportVersion=%s",
+         f->plugin_key, f->sample_rate,f->filter_id,ST_PLUGIN_VERSION);
+    pthread_mutex_lock(&f->qlock);f->reconnects++;pthread_mutex_unlock(&f->qlock);
 
 	struct lws_client_connect_info ci;
 	memset(&ci, 0, sizeof(ci));
@@ -304,6 +382,12 @@ static const char *st_ca_bundle_path(void)
 	return path[0] ? path : NULL;
 }
 
+static void st_service_pulse(lws_sorted_usec_list_t *sul)
+{
+    struct st_filter *f=lws_container_of(sul,struct st_filter,service_pulse);
+    if(!f->stop) lws_sul_schedule(f->lws_ctx,0,&f->service_pulse,st_service_pulse,LWS_US_PER_SEC);
+}
+
 static void *st_ws_thread(void *arg)
 {
 	struct st_filter *f = arg;
@@ -323,9 +407,11 @@ static void *st_ws_thread(void *arg)
 		return NULL;
 	}
 
+    lws_sul_schedule(f->lws_ctx,0,&f->service_pulse,st_service_pulse,LWS_US_PER_SEC);
 	uint64_t last_status = 0;
 	while (!f->stop) {
-		if (!f->wsi) {
+		st_health_snapshot(f);
+		if (!f->wsi && !f->conflict_paused) {
 			uint64_t now = os_gettime_ns();
 			if (now >= next_retry) {
 				st_connect(f);
@@ -340,20 +426,21 @@ static void *st_ws_thread(void *arg)
 			pthread_mutex_lock(&f->qlock);
 			int pending = f->qcount;
 			pthread_mutex_unlock(&f->qlock);
-			if (pending > 0)
+			if (pending > 0 || f->health_count > 0)
 				lws_callback_on_writable(f->wsi);
 		}
 		lws_service(f->lws_ctx, 20);
 
 		/* refresh the status line with live counters once a second */
 		uint64_t now2 = os_gettime_ns();
-		if (f->connected && !f->muted_now && now2 - last_status > 1000000000ULL) {
+		if (f->connected && !f->muted_now && now2 - last_status > 15000000000ULL) {
 			last_status = now2;
 			st_set_status(f, "Connected to %s - captured %d, sent %d audio chunks",
 				      f->server, f->audio_chunks_captured, f->audio_chunks_sent);
 		}
 	}
 
+    lws_sul_cancel(&f->service_pulse);
 	if (f->wsi) {
 		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
 		lws_service(f->lws_ctx, 50);
@@ -395,8 +482,7 @@ static void st_build_resampler(struct st_filter *f)
 		.speakers = SPEAKERS_MONO,
 	};
 	f->resampler = audio_resampler_create(&dst, &src);
-	if (!f->resampler)
-		blog(LOG_ERROR, "[streamtranslate] resampler creation failed");
+    if (!f->resampler) { pthread_mutex_lock(&f->qlock);f->resample_errors++;pthread_mutex_unlock(&f->qlock);blog(LOG_ERROR, "[streamtranslate] resampler creation failed"); }
 }
 
 static void st_update(void *data, obs_data_t *settings)
@@ -422,6 +508,7 @@ static void *st_create(obs_data_t *settings, obs_source_t *context)
 {
 	struct st_filter *f = bzalloc(sizeof(struct st_filter));
 	f->context = context;
+    snprintf(f->filter_id,sizeof(f->filter_id),"filter-%" PRIx64,os_gettime_ns());
 	pthread_mutex_init(&f->qlock, NULL);
 	st_build_resampler(f);
 	st_update(f, settings);
@@ -447,8 +534,13 @@ static void st_destroy(void *data)
 static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data *audio)
 {
 	struct st_filter *f = data;
-	if (!audio || !audio->frames)
-		return audio;
+    pthread_mutex_lock(&f->qlock);
+    f->callbacks++;f->last_callback_ns=os_gettime_ns();
+    if(audio)f->input_frames+=audio->frames;
+    f->left_peak=0;f->right_peak=0;
+    if(audio){for(size_t ch=0;ch<2;ch++){if(!audio->data[ch])continue;double peak=0;const float *samples=(const float*)audio->data[ch];for(uint32_t i=0;i<audio->frames;i++){double v=fabs(samples[i]);if(isfinite(v)&&v>peak)peak=v;}if(ch==0)f->left_peak=peak;else f->right_peak=peak;}}
+    pthread_mutex_unlock(&f->qlock);
+    if (!audio || !audio->frames) return audio;
 
 	/* OBS applies a source's mute AFTER its filter chain, so a muted mic still
 	 * reaches us. Without this check a streamer who mutes for a private moment
@@ -459,6 +551,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 	if (blocked) {
 		if (!f->muted_now) {
 			f->muted_now = true;
+            st_queue_clear(f);
 			st_set_status(f, "Muted in OBS - not sending audio (captured %d, sent %d)",
 				      f->audio_chunks_captured, f->audio_chunks_sent);
 		}
@@ -483,10 +576,10 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 				     audio->frames) &&
 	    out_frames > 0 && out[0]) {
 		st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
-		f->audio_chunks_captured++;
+		pthread_mutex_lock(&f->qlock);f->audio_chunks_captured++;pthread_mutex_unlock(&f->qlock);
 		if (f->lws_ctx)
 			lws_cancel_service(f->lws_ctx); /* wake ws thread to flush */
-	}
+    } else { pthread_mutex_lock(&f->qlock);f->resample_errors++;pthread_mutex_unlock(&f->qlock); }
 	return audio;
 }
 
@@ -497,6 +590,7 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	(void)prop;
 	if (!f)
 		return false;
+	f->conflict_paused=false;
 	st_set_status(f, "Reconnecting ...");
 	if (f->wsi) {
 		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
