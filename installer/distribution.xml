@@ -13,5 +13,5 @@
   <choice id="live.streamtranslate.obs-plugin" visible="false">
     <pkg-ref id="live.streamtranslate.obs-plugin"/>
   </choice>
-  <pkg-ref id="live.streamtranslate.obs-plugin" version="0.1.0" onConclusion="none">component.pkg</pkg-ref>
+  <pkg-ref id="live.streamtranslate.obs-plugin" version="0.1.2" onConclusion="none">component.pkg</pkg-ref>
 </installer-gui-script>
