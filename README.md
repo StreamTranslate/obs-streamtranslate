@@ -21,7 +21,7 @@ Filter = the microphone. Browser source = the screen.
 
 ## Install
 
-Grab the latest build from [Releases](https://github.com/Zeusxzx/obs-streamtranslate/releases/latest).
+Grab the latest build from [Releases](https://github.com/StreamTranslate/obs-streamtranslate/releases/latest).
 
 ### macOS
 
