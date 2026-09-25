@@ -70,6 +70,7 @@ struct st_filter {
 	char health_ring[16][2048];
 	unsigned health_read, health_count;
 	bool conflict_paused;
+	bool user_paused; /* Stop button in the filter properties -- not saved to settings */
 
 
 	/* audio conversion */
@@ -411,7 +412,7 @@ static void *st_ws_thread(void *arg)
 	uint64_t last_status = 0;
 	while (!f->stop) {
 		st_health_snapshot(f);
-		if (!f->wsi && !f->conflict_paused) {
+		if (!f->wsi && !f->conflict_paused && !f->user_paused) {
 			uint64_t now = os_gettime_ns();
 			if (now >= next_retry) {
 				st_connect(f);
@@ -583,6 +584,26 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 	return audio;
 }
 
+static bool st_stop_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
+{
+	struct st_filter *f = data;
+	(void)props;
+	(void)prop;
+	if (!f)
+		return false;
+	f->user_paused = true;
+	st_queue_clear(f);
+	st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
+	if (f->wsi) {
+		/* Force the live socket closed now instead of waiting for it to time out,
+		 * so the pause takes effect immediately. */
+		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+	}
+	if (f->lws_ctx)
+		lws_cancel_service(f->lws_ctx);
+	return true;
+}
+
 static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
 {
 	struct st_filter *f = data;
@@ -591,6 +612,7 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	if (!f)
 		return false;
 	f->conflict_paused=false;
+	f->user_paused=false;
 	st_set_status(f, "Reconnecting ...");
 	if (f->wsi) {
 		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
@@ -624,6 +646,8 @@ static obs_properties_t *st_get_properties(void *data)
 		}
 	}
 
+	obs_properties_add_button2(props, "stop_stream", "Stop (pause sending audio)",
+				   st_stop_clicked, f);
 	obs_properties_add_button2(props, "reconnect", "Reconnect / Test connection",
 				   st_reconnect_clicked, f);
 	return props;
