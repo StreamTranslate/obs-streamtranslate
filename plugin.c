@@ -106,7 +106,9 @@ static void st_set_status(struct st_filter *f, const char *fmt, ...)
 			obs_data_set_string(sd, "status_text", f->status);
 			obs_data_release(sd);
 		}
-		obs_source_update_properties(f->context);
+		/* Do not rebuild OBS/Qt properties from an audio/network callback or
+		 * while a properties button is handling its mouse release. OBS refreshes
+		 * the panel itself when a button callback returns true. */
 	}
 }
 
@@ -226,6 +228,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
 	case LWS_CALLBACK_CLIENT_WRITEABLE: {
+        if (f->user_paused) { st_queue_clear(f); return 0; }
         if(f->health_count){
             unsigned char payload[LWS_PRE+2048];
             const char *text=f->health_ring[f->health_read];size_t size=strlen(text);
@@ -263,7 +266,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-		st_set_status(f, "Connection FAILED: %s (server: %s) - retrying",
+		if (!f->user_paused) st_set_status(f, "Connection FAILED: %s (server: %s) - retrying",
 			      in ? (const char *)in : "unknown error", f->server);
 		f->connected = false;
 		f->wsi = NULL;
@@ -276,7 +279,8 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
         st_queue_clear(f);
-        if(!f->conflict_paused) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
+		if (f->user_paused) st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
+        else if(!f->conflict_paused) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
 		break;
@@ -541,7 +545,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
     f->left_peak=0;f->right_peak=0;
     if(audio){for(size_t ch=0;ch<2;ch++){if(!audio->data[ch])continue;double peak=0;const float *samples=(const float*)audio->data[ch];for(uint32_t i=0;i<audio->frames;i++){double v=fabs(samples[i]);if(isfinite(v)&&v>peak)peak=v;}if(ch==0)f->left_peak=peak;else f->right_peak=peak;}}
     pthread_mutex_unlock(&f->qlock);
-    if (!audio || !audio->frames) return audio;
+    if (!audio || !audio->frames || f->user_paused) return audio;
 
 	/* OBS applies a source's mute AFTER its filter chain, so a muted mic still
 	 * reaches us. Without this check a streamer who mutes for a private moment
