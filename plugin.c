@@ -590,7 +590,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 		if (!f->resampler)
 			return audio;
 	}
-	
+
 
 	uint8_t *out[MAX_AV_PLANES] = {0};
 	uint32_t out_frames = 0;
