@@ -34,7 +34,8 @@
 
 OBS_DECLARE_MODULE()
 
-#define ST_PLUGIN_VERSION "capture-health-v1"
+#include "retry-policy.h"
+#define ST_PLUGIN_VERSION "capture-health-v2"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
 #elif defined(__APPLE__)
@@ -70,6 +71,8 @@ struct st_filter {
 	char health_ring[16][2048];
 	unsigned health_read, health_count;
 	bool conflict_paused;
+	bool terminal_paused, waiting_audio;
+	uint64_t retry_after_audio_ns, last_usable_audio_ns;
 	bool user_paused; /* Stop button in the filter properties -- not saved to settings */
 
 
@@ -274,13 +277,23 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 
     case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
         if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1];
+            if(st_close_policy(code)==ST_RETRY_MANUAL && code!=4001 && code!=4009){
+                f->terminal_paused=true;
+                st_set_status(f,code==4008 ? "Stopped after idle timeout. Press Reconnect to start again." :
+                    code==4403 ? "Plugin key rejected. Update your Plugin Key, then press Reconnect." :
+                    "Session stopped by server. Check your account, then press Reconnect.");
+            }
+            if(st_close_policy(code)==ST_RETRY_AUDIO){
+                pthread_mutex_lock(&f->qlock);f->waiting_audio=true;f->retry_after_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
+                st_set_status(f,"No audio received. Waiting for the OBS source to send audio before retrying.");
+            }
             if(code==4001 || code==4009){f->conflict_paused=true;st_set_status(f,"Another audio source is active. Reconnect only to switch back to this filter.");}
         }
         break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
         st_queue_clear(f);
 		if (f->user_paused) st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
-        else if(!f->conflict_paused) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
+        else if(!f->conflict_paused && !f->terminal_paused && !f->waiting_audio) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
 		break;
@@ -416,7 +429,11 @@ static void *st_ws_thread(void *arg)
 	uint64_t last_status = 0;
 	while (!f->stop) {
 		st_health_snapshot(f);
-		if (!f->wsi && !f->conflict_paused && !f->user_paused) {
+		pthread_mutex_lock(&f->qlock);
+        if(f->waiting_audio && st_audio_can_retry(f->last_usable_audio_ns,f->retry_after_audio_ns,os_gettime_ns())) f->waiting_audio=false;
+        bool waiting_audio=f->waiting_audio;
+        pthread_mutex_unlock(&f->qlock);
+        if (!f->wsi && !f->conflict_paused && !f->user_paused && !f->terminal_paused && !waiting_audio) {
 			uint64_t now = os_gettime_ns();
 			if (now >= next_retry) {
 				st_connect(f);
@@ -502,7 +519,11 @@ static void st_update(void *data, obs_data_t *settings)
 	snprintf(f->server, sizeof(f->server), "%s", server ? server : "");
 	snprintf(f->plugin_key, sizeof(f->plugin_key), "%s", key ? key : "");
 
-	if (changed && f->wsi) {
+	if (changed) {
+        f->terminal_paused=false;f->conflict_paused=false;
+        pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
+    }
+    if (changed && f->wsi) {
 		/* reconnect with new credentials: close current, thread will redial */
 		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
 		lws_cancel_service(f->lws_ctx);
@@ -569,8 +590,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 		if (!f->resampler)
 			return audio;
 	}
-	if (!f->connected)
-		return audio; /* always pass audio through untouched */
+
 
 	uint8_t *out[MAX_AV_PLANES] = {0};
 	uint32_t out_frames = 0;
@@ -580,7 +600,15 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 				     (const uint8_t *const *)audio->data,
 				     audio->frames) &&
 	    out_frames > 0 && out[0]) {
-		st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
+		/* A callback alone may be silence. Use the same PCM RMS floor as the
+         * server, after conversion, to wake a no-audio admission pause. */
+        const int16_t *pcm=(const int16_t *)out[0];double energy=0;
+        for(uint32_t i=0;i<out_frames;i++) energy+=(double)pcm[i]*pcm[i];
+        if(sqrt(energy/out_frames)>=180){
+            pthread_mutex_lock(&f->qlock);f->last_usable_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
+        }
+        if(!f->connected) return audio;
+        st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
 		pthread_mutex_lock(&f->qlock);f->audio_chunks_captured++;pthread_mutex_unlock(&f->qlock);
 		if (f->lws_ctx)
 			lws_cancel_service(f->lws_ctx); /* wake ws thread to flush */
@@ -616,6 +644,8 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	if (!f)
 		return false;
 	f->conflict_paused=false;
+    f->terminal_paused=false;
+    pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
 	f->user_paused=false;
 	st_set_status(f, "Reconnecting ...");
 	if (f->wsi) {
