@@ -1,4 +1,4 @@
-name: Build Linux plugin
+name: Build OBS plugin
 on:
   push:
     branches: [main]
@@ -24,7 +24,7 @@ jobs:
           path: build/obs-streamtranslate.so
 
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -62,7 +62,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>live.streamtranslate.obs-plugin</string>
             <key>CFBundleExecutable</key><string>obs-streamtranslate</string>
             <key>CFBundlePackageType</key><string>BNDL</string>
-            <key>CFBundleVersion</key><string>0.1.6</string>
+            <key>CFBundleVersion</key><string>0.1.7</string>
           </dict>
           </plist>
           PLIST
@@ -128,7 +128,7 @@ jobs:
           chmod +x scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
-            --version 0.1.6 \
+            --version 0.1.7 \
             --scripts scripts \
             --install-location "/" \
             component.pkg
