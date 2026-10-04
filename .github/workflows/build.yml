@@ -29,6 +29,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: brew install libwebsockets pkg-config simde
+      - name: Fetch pinned macOS 14-compatible bundled libraries
+        run: |
+          curl -fL --retry 3 -o previous.pkg \
+            https://github.com/StreamTranslate/obs-streamtranslate/releases/download/v0.1.6/StreamTranslate-OBS-Plugin.pkg
+          echo 'b906091c450e419476a32a00bfa66d6ec7ceea82f5db756d2808f3e26214b274  previous.pkg' | shasum -a 256 -c -
+          pkgutil --expand-full previous.pkg previous-pkg
+          mkdir -p dist/obs-streamtranslate.plugin/Contents/Frameworks
+          cp previous-pkg/component.pkg/Payload/Library/Application\ Support/StreamTranslate/obs-streamtranslate.plugin/Contents/Frameworks/*.dylib \
+            dist/obs-streamtranslate.plugin/Contents/Frameworks/
       - name: Fetch libobs headers
         run: git clone --depth 1 --branch 32.2.2 https://github.com/obsproject/obs-studio.git
       - name: Compile plugin bundle
@@ -46,7 +55,7 @@ jobs:
           #define OBS_RELEASE_CANDIDATE 0
           #define OBS_BETA 0
           HDR
-          clang -bundle -O2 -o dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate \
+          clang -bundle -O2 -mmacosx-version-min=14.0 -o dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate \
             plugin.c \
             -I obs-studio/libobs \
             -I genhdr \
@@ -62,7 +71,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>live.streamtranslate.obs-plugin</string>
             <key>CFBundleExecutable</key><string>obs-streamtranslate</string>
             <key>CFBundlePackageType</key><string>BNDL</string>
-            <key>CFBundleVersion</key><string>0.1.7</string>
+            <key>CFBundleVersion</key><string>0.1.8</string>
           </dict>
           </plist>
           PLIST
@@ -70,41 +79,20 @@ jobs:
         run: |
           mkdir -p dist/obs-streamtranslate.plugin/Contents/Resources
           curl -sSL -o dist/obs-streamtranslate.plugin/Contents/Resources/cacert.pem https://curl.se/ca/cacert.pem
-      - name: Bundle dylib dependencies (no brew needed on user machines)
+      - name: Link pinned macOS 14-compatible libraries
         run: |
           BIN=dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate
           FW=dist/obs-streamtranslate.plugin/Contents/Frameworks
-          mkdir -p "$FW"
-          # copy libwebsockets + its openssl deps into the bundle and rewrite load paths
-          copy_and_fix() {
-            local lib="$1"
-            local base=$(basename "$lib")
-            [ -f "$FW/$base" ] || cp "$lib" "$FW/$base"
-            chmod u+w "$FW/$base"
-          }
           LWS=$(otool -L "$BIN" | awk '/libwebsockets/ {print $1}')
-          copy_and_fix "$LWS"
-          LWS_BASE=$(basename "$LWS")
-          install_name_tool -change "$LWS" "@loader_path/../Frameworks/$LWS_BASE" "$BIN"
-          # openssl deps referenced by libwebsockets
-          for dep in $(otool -L "$FW/$LWS_BASE" | awk '/openssl/ {print $1}'); do
-            copy_and_fix "$dep"
-            DEP_BASE=$(basename "$dep")
-            install_name_tool -change "$dep" "@loader_path/$DEP_BASE" "$FW/$LWS_BASE"
+          install_name_tool -change "$LWS" '@loader_path/../Frameworks/libwebsockets.22.dylib' "$BIN"
+          for lib in "$BIN" "$FW"/*.dylib; do
+            minos=$(otool -l "$lib" | awk '/LC_BUILD_VERSION/{seen=1} seen && /minos/{print $2; exit}')
+            test "$minos" = '14.0' || { echo "Unsupported minimum $minos: $lib"; exit 1; }
           done
-          # libssl itself references libcrypto — fix inside the copied libssl too
-          for lib in "$FW"/libssl*.dylib; do
-            [ -f "$lib" ] || continue
-            for dep in $(otool -L "$lib" | awk '/openssl.*libcrypto/ {print $1}'); do
-              copy_and_fix "$dep"
-              install_name_tool -change "$dep" "@loader_path/$(basename $dep)" "$lib"
-            done
-          done
-          # ad-hoc sign everything so macOS loads the modified binaries
           codesign --force --sign - "$FW"/*.dylib "$BIN"
           echo "--- final link check ---"
           otool -L "$BIN"
-          otool -L "$FW/$LWS_BASE"
+          otool -L "$FW/libwebsockets.22.dylib"
       - name: Build branded .pkg installer
         run: |
           # OBS on Apple Silicon ONLY scans ~/Library/Application Support/obs-studio/plugins
@@ -128,7 +116,7 @@ jobs:
           chmod +x scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
-            --version 0.1.7 \
+            --version 0.1.8 \
             --scripts scripts \
             --install-location "/" \
             component.pkg
