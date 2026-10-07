@@ -1,6 +1,9 @@
 #include <assert.h>
 #include "../retry-policy.h"
 int main(void) {
+ assert(st_close_policy(4402)==ST_RETRY_MANUAL);
+ assert(st_close_policy(4400)==ST_RETRY_MANUAL);
+ assert(st_close_policy(4005)==ST_RETRY_MANUAL);
  assert(st_close_policy(4008)==ST_RETRY_MANUAL);
  assert(st_close_policy(4403)==ST_RETRY_MANUAL);
  assert(st_close_policy(4003)==ST_RETRY_MANUAL);
