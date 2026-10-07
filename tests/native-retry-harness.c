@@ -9,8 +9,15 @@ static void *make_source(obs_data_t *settings,obs_source_t *context){(void)setti
 static void free_source(void *data){(void)data;}
 
 #include <assert.h>
+
+struct ui_job {obs_task_t task;void *param;struct ui_job *next;};
+static pthread_mutex_t ui_lock=PTHREAD_MUTEX_INITIALIZER;
+static struct ui_job *ui_jobs;
+static void test_queue_ui(obs_task_t task,void *param,bool wait){assert(!wait);struct ui_job *job=calloc(1,sizeof(*job));job->task=task;job->param=param;pthread_mutex_lock(&ui_lock);struct ui_job **end=&ui_jobs;while(*end)end=&(*end)->next;*end=job;pthread_mutex_unlock(&ui_lock);}
+static void test_pump_ui(void){pthread_mutex_lock(&ui_lock);struct ui_job *jobs=ui_jobs;ui_jobs=NULL;pthread_mutex_unlock(&ui_lock);while(jobs){struct ui_job *next=jobs->next;jobs->task(jobs->param);free(jobs);jobs=next;}}
+
 int main(void){
- assert(obs_startup("en-US",NULL,NULL));
+ assert(obs_startup("en-US",NULL,NULL));obs_set_ui_task_handler(test_queue_ui);test_pump_ui();
  struct obs_audio_info ai={.samples_per_sec=48000,.speakers=SPEAKERS_STEREO};assert(obs_reset_audio(&ai));
  struct obs_source_info src={.id="qa_audio",.type=OBS_SOURCE_TYPE_INPUT,.output_flags=OBS_SOURCE_AUDIO,.get_name=name,.create=make_source,.destroy=free_source};obs_register_source(&src);obs_register_source(&st_filter_info);
  obs_source_t *source=obs_source_create_private("qa_audio","QA retry",NULL);obs_set_output_source(0,source);
@@ -23,8 +30,8 @@ int main(void){
    if(age>15&&age<16){assert(f->waiting_audio && f->reconnects==3);}
    for(int i=0;i<480;i++){right[i]=age<17?0:0.3f*sin(phase);phase+=2*3.141592653589793*440/48000;}
    struct obs_audio_data a={.data={(uint8_t*)left,(uint8_t*)right},.frames=480,.timestamp=os_gettime_ns()};
-   st_filter_audio(f,&a);os_sleep_ms(10);
+   st_filter_audio(f,&a);test_pump_ui();os_sleep_ms(10);
  }
  assert(f->reconnects==5 && f->connected && f->audio_chunks_sent>50);
- st_destroy(f);obs_set_output_source(0,NULL);obs_source_release(source);obs_data_release(settings);obs_shutdown();puts("PASS native idle/key pause, explicit resume, no-audio wait, voice wake, service restart and PCM resume");return 0;
+ st_destroy(f);test_pump_ui();obs_set_output_source(0,NULL);obs_source_release(source);obs_data_release(settings);obs_shutdown();puts("PASS native idle/key pause, explicit resume, no-audio wait, voice wake, service restart and PCM resume");return 0;
 }

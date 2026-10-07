@@ -3,7 +3,7 @@
   <title>StreamTranslate OBS Plugin</title>
   <welcome file="welcome.html"/>
   <background file="background.png" alignment="bottomleft" scaling="proportional"/>
-  <options customize="never" require-scripts="false"/>
+  <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
   <choices-outline>
     <line choice="default">
       <line choice="live.streamtranslate.obs-plugin"/>
@@ -13,5 +13,5 @@
   <choice id="live.streamtranslate.obs-plugin" visible="false">
     <pkg-ref id="live.streamtranslate.obs-plugin"/>
   </choice>
-  <pkg-ref id="live.streamtranslate.obs-plugin" version="0.1.8" onConclusion="none">component.pkg</pkg-ref>
+  <pkg-ref id="live.streamtranslate.obs-plugin" version="0.1.9" onConclusion="none">component.pkg</pkg-ref>
 </installer-gui-script>
