@@ -60,6 +60,10 @@ struct st_filter {
 	/* Two-speaker (stereo split): keep L/R separate instead of folding to mono, so
 	   a Rode/DJI receiver in SPLIT mode gives one caption track per transmitter. */
 	bool stereo_split;
+	/* Which speaker this filter carries when it sits on a single-mic source:
+	   0 = Mic 1 (default), 1 = Mic 2. Sent as &speaker=1 so the server runs a
+	   second caption track for the same room. */
+	int speaker;
 
 	/* live status shown in the filter UI */
 	char status[320];
@@ -327,9 +331,10 @@ static void st_connect(struct st_filter *f)
 	}
 
 	char path[512];
-	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&transportVersion=%s%s",
+	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&transportVersion=%s%s%s",
          f->plugin_key, f->sample_rate,f->filter_id,ST_PLUGIN_VERSION,
-         f->sending_stereo ? "&channels=2" : "");
+         f->sending_stereo ? "&channels=2" : "",
+         f->speaker == 1 ? "&speaker=1" : "");
     pthread_mutex_lock(&f->qlock);f->reconnects++;pthread_mutex_unlock(&f->qlock);
 
 	struct lws_client_connect_info ci;
@@ -527,11 +532,16 @@ static void st_update(void *data, obs_data_t *settings)
 	const char *server = obs_data_get_string(settings, "server");
 	const char *key = obs_data_get_string(settings, "plugin_key");
 
-	bool stereo = obs_data_get_bool(settings, "stereo_split");
+	/* mic_mode: 0 = Mic 1, 1 = Mic 2, 2 = stereo pair (left = Mic 1, right = Mic 2) */
+	long long mic_mode = obs_data_get_int(settings, "mic_mode");
+	bool stereo = mic_mode == 2;
+	int speaker = mic_mode == 1 ? 1 : 0;
 
 	bool changed = strcmp(f->server, server ? server : "") != 0 ||
 		       strcmp(f->plugin_key, key ? key : "") != 0 ||
-		       stereo != f->stereo_split;
+		       stereo != f->stereo_split ||
+		       speaker != f->speaker;
+	f->speaker = speaker;
 
 	snprintf(f->server, sizeof(f->server), "%s", server ? server : "");
 	snprintf(f->plugin_key, sizeof(f->plugin_key), "%s", key ? key : "");
@@ -697,13 +707,16 @@ static obs_properties_t *st_get_properties(void *data)
 				OBS_TEXT_PASSWORD);
 	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
 
-	obs_property_t *two = obs_properties_add_bool(props, "stereo_split",
-		"Two-speaker mode (stereo split)");
-	obs_property_set_long_description(two,
-		"For a dual wireless mic receiver in SPLIT mode (Rode Wireless GO II, DJI Mic 2):\n"
-		"transmitter 1 on the left channel, transmitter 2 on the right.\n"
-		"Each speaker gets its own captions, labelled Mic 1 and Mic 2 on your overlay.\n"
-		"Leave off for a single microphone.");
+	obs_property_t *mode = obs_properties_add_list(props, "mic_mode",
+		"Who is on this audio source?", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(mode, "One speaker - Mic 1 (default)", 0);
+	obs_property_list_add_int(mode, "One speaker - Mic 2 (add this filter to your 2nd mic)", 1);
+	obs_property_list_add_int(mode, "Two speakers on this one source (left = Mic 1, right = Mic 2)", 2);
+	obs_property_set_long_description(mode,
+		"Two mics, two OBS sources: put this filter on each source. Set one to Mic 1 and the other to Mic 2.\n"
+		"Two mics mixed into ONE stereo source (Rode Wireless GO II / DJI Mic 2 in split or stereo mode): "
+		"pick 'Two speakers on this one source'.\n"
+		"Captions are labelled Mic 1 / Mic 2 on your overlay. Leave on Mic 1 for a single microphone.");
 
 	/* live status — updated by the connection thread */
 	obs_property_t *st = obs_properties_add_text(props, "status_text", "Status", OBS_TEXT_INFO);
@@ -728,9 +741,9 @@ static obs_properties_t *st_get_properties(void *data)
 
 static void st_get_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_string(settings, "server", "streamtranslate.live");
+	obs_data_set_default_string(settings, "server", "streamtranslate-staging.up.railway.app");
 	obs_data_set_default_string(settings, "plugin_key", "");
-	obs_data_set_default_bool(settings, "stereo_split", false);
+	obs_data_set_default_int(settings, "mic_mode", 0);
 }
 
 static struct obs_source_info st_filter_info = {
