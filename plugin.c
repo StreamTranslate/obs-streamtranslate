@@ -57,6 +57,9 @@ struct st_filter {
 	/* config */
 	char server[256];
 	char plugin_key[128];
+	/* Two-speaker (stereo split): keep L/R separate instead of folding to mono, so
+	   a Rode/DJI receiver in SPLIT mode gives one caption track per transmitter. */
+	bool stereo_split;
 
 	/* live status shown in the filter UI */
 	char status[320];
@@ -79,6 +82,11 @@ struct st_filter {
 	/* audio conversion */
 	audio_resampler_t *resampler;
 	uint32_t sample_rate;
+	bool sending_stereo; /* what the resampler is actually producing */
+	/* Set from the UI thread, acted on by the audio thread. The resampler must only
+	   ever be destroyed/created on the thread that calls audio_resampler_resample(),
+	   otherwise toggling the checkbox mid-stream frees it under the audio callback. */
+	volatile bool resampler_dirty;
 
 	/* websocket service thread */
 	pthread_t thread;
@@ -319,8 +327,9 @@ static void st_connect(struct st_filter *f)
 	}
 
 	char path[512];
-	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&transportVersion=%s",
-         f->plugin_key, f->sample_rate,f->filter_id,ST_PLUGIN_VERSION);
+	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&transportVersion=%s%s",
+         f->plugin_key, f->sample_rate,f->filter_id,ST_PLUGIN_VERSION,
+         f->sending_stereo ? "&channels=2" : "");
     pthread_mutex_lock(&f->qlock);f->reconnects++;pthread_mutex_unlock(&f->qlock);
 
 	struct lws_client_connect_info ci;
@@ -498,10 +507,15 @@ static void st_build_resampler(struct st_filter *f)
 		.format = AUDIO_FORMAT_FLOAT_PLANAR,
 		.speakers = aoi->speakers,
 	};
+	/* Only keep two channels when the user asked for it AND the source really has
+	   them -- a mono source forced to stereo would just duplicate one voice onto
+	   both captions. Falls back to mono silently in that case. */
+	bool want_stereo = f->stereo_split && get_audio_channels(aoi->speakers) >= 2;
+	f->sending_stereo = want_stereo;
 	struct resample_info dst = {
 		.samples_per_sec = aoi->samples_per_sec,
 		.format = AUDIO_FORMAT_16BIT,
-		.speakers = SPEAKERS_MONO,
+		.speakers = want_stereo ? SPEAKERS_STEREO : SPEAKERS_MONO,
 	};
 	f->resampler = audio_resampler_create(&dst, &src);
     if (!f->resampler) { pthread_mutex_lock(&f->qlock);f->resample_errors++;pthread_mutex_unlock(&f->qlock);blog(LOG_ERROR, "[streamtranslate] resampler creation failed"); }
@@ -513,11 +527,23 @@ static void st_update(void *data, obs_data_t *settings)
 	const char *server = obs_data_get_string(settings, "server");
 	const char *key = obs_data_get_string(settings, "plugin_key");
 
+	bool stereo = obs_data_get_bool(settings, "stereo_split");
+
 	bool changed = strcmp(f->server, server ? server : "") != 0 ||
-		       strcmp(f->plugin_key, key ? key : "") != 0;
+		       strcmp(f->plugin_key, key ? key : "") != 0 ||
+		       stereo != f->stereo_split;
 
 	snprintf(f->server, sizeof(f->server), "%s", server ? server : "");
 	snprintf(f->plugin_key, sizeof(f->plugin_key), "%s", key ? key : "");
+
+	if (stereo != f->stereo_split) {
+		/* Channel layout is baked into the resampler and announced in the connect
+		   URL. Do NOT rebuild here -- this runs on the UI thread. Flag it and let
+		   the audio thread swap the resampler between frames; the reconnect below
+		   then re-announces the new channel count. */
+		f->stereo_split = stereo;
+		f->resampler_dirty = true;
+	}
 
 	if (changed) {
         f->terminal_paused=false;f->conflict_paused=false;
@@ -585,6 +611,11 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 	}
 	if (f->muted_now)
 		f->muted_now = false;
+	if (f->resampler_dirty) {
+		/* Owned by this thread -- safe to destroy and recreate here. */
+		f->resampler_dirty = false;
+		st_build_resampler(f);
+	}
 	if (!f->resampler) {
 		st_build_resampler(f); /* audio subsystem may not have been ready at create time */
 		if (!f->resampler)
@@ -666,6 +697,14 @@ static obs_properties_t *st_get_properties(void *data)
 				OBS_TEXT_PASSWORD);
 	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
 
+	obs_property_t *two = obs_properties_add_bool(props, "stereo_split",
+		"Two-speaker mode (stereo split)");
+	obs_property_set_long_description(two,
+		"For a dual wireless mic receiver in SPLIT mode (Rode Wireless GO II, DJI Mic 2):\n"
+		"transmitter 1 on the left channel, transmitter 2 on the right.\n"
+		"Each speaker gets its own captions, labelled Mic 1 and Mic 2 on your overlay.\n"
+		"Leave off for a single microphone.");
+
 	/* live status — updated by the connection thread */
 	obs_property_t *st = obs_properties_add_text(props, "status_text", "Status", OBS_TEXT_INFO);
 	if (f) {
@@ -691,6 +730,7 @@ static void st_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "server", "streamtranslate.live");
 	obs_data_set_default_string(settings, "plugin_key", "");
+	obs_data_set_default_bool(settings, "stereo_split", false);
 }
 
 static struct obs_source_info st_filter_info = {
