@@ -36,6 +36,7 @@ OBS_DECLARE_MODULE()
 
 #include "retry-policy.h"
 #define ST_PLUGIN_VERSION "capture-health-v2"
+#define ST_RELEASE_VERSION "0.1.9"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
 #elif defined(__APPLE__)
@@ -63,6 +64,8 @@ struct st_filter {
 
 	/* live status shown in the filter UI */
 	char status[320];
+	unsigned last_close_code;
+	bool show_diagnostics;
 	bool muted_now;
 	int  audio_chunks_captured;
 	int  audio_chunks_sent;
@@ -102,6 +105,16 @@ struct st_filter {
 	int qcount;
 };
 
+/* Refresh only on OBS's UI task queue. A source reference keeps queued work
+ * safe if the filter dialog closes; never rebuild properties in a WS callback
+ * or while a properties button is handling its mouse release. */
+static void st_refresh_status_ui(void *data)
+{
+    obs_source_t *source = data;
+    obs_source_update_properties(source);
+    obs_source_release(source);
+}
+
 static void st_set_status(struct st_filter *f, const char *fmt, ...)
 {
 	va_list ap;
@@ -117,9 +130,12 @@ static void st_set_status(struct st_filter *f, const char *fmt, ...)
 			obs_data_set_string(sd, "status_text", f->status);
 			obs_data_release(sd);
 		}
-		/* Do not rebuild OBS/Qt properties from an audio/network callback or
-		 * while a properties button is handling its mouse release. OBS refreshes
-		 * the panel itself when a button callback returns true. */
+        /* Button callbacks return true to refresh themselves. Network/audio
+         * status changes must explicitly schedule a UI refresh. */
+        if (!obs_in_task_thread(OBS_TASK_UI)) {
+            obs_source_t *source = obs_source_get_ref(f->context);
+            if (source) obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, source, false);
+        }
 	}
 }
 
@@ -231,8 +247,8 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 
 	switch (reason) {
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
-		st_set_status(f, "Connected to %s - streaming audio", f->server);
-		f->connected = true;
+        f->connected = true;
+        st_set_status(f, "Connected to %s - streaming audio", f->server);
 		f->last_health_ns=0;
 		st_health_snapshot(f);
 		lws_callback_on_writable(wsi);
@@ -284,12 +300,11 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
     case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
-        if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1];
+        if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1];f->last_close_code=code;
+            blog(LOG_INFO,"[streamtranslate] Server close code: %u",code);
             if(st_close_policy(code)==ST_RETRY_MANUAL && code!=4001 && code!=4009){
                 f->terminal_paused=true;
-                st_set_status(f,code==4008 ? "Stopped after idle timeout. Press Reconnect to start again." :
-                    code==4403 ? "Plugin key rejected. Update your Plugin Key, then press Reconnect." :
-                    "Session stopped by server. Check your account, then press Reconnect.");
+                st_set_status(f,"%s (code %u)",st_close_message(code),code);
             }
             if(st_close_policy(code)==ST_RETRY_AUDIO){
                 pthread_mutex_lock(&f->qlock);f->waiting_audio=true;f->retry_after_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
@@ -546,7 +561,8 @@ static void st_update(void *data, obs_data_t *settings)
 	}
 
 	if (changed) {
-        f->terminal_paused=false;f->conflict_paused=false;
+        f->terminal_paused=false;
+    f->last_close_code=0;f->conflict_paused=false;
         pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
     }
     if (changed && f->wsi) {
@@ -676,6 +692,7 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 		return false;
 	f->conflict_paused=false;
     f->terminal_paused=false;
+    f->last_close_code=0;
     pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
 	f->user_paused=false;
 	st_set_status(f, "Reconnecting ...");
@@ -685,6 +702,34 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
 	return true;
+}
+
+static bool st_diagnostics_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
+{
+    (void)props; (void)prop;
+    struct st_filter *f = data;
+    if (!f) return false;
+    f->show_diagnostics = !f->show_diagnostics;
+    return true;
+}
+
+static void st_diagnostic_text(struct st_filter *f, char *out, size_t size)
+{
+    uint64_t now = os_gettime_ns();
+    pthread_mutex_lock(&f->qlock);
+    snprintf(out,size,
+      "Plugin %s | OBS %s\nConnection: %s\nAudio chunks: captured %d, sent %d\n"
+      "Last delivery: %s | Queue: %d\nWrite errors: %" PRIu64 " | Conversion errors: %" PRIu64 "\n"
+      "Last server close code: %u\n\n"
+      "If account access is blocked, copy the current plugin key from Control and check your plan.\n"
+      "If no audio is delivered, check that the source and filter are enabled and the source is not muted.\n"
+      "Reconnect switches this filter back on. Stop pauses this filter only.\n"
+      "For support, use Help > Log Files > View Current Log in OBS. Do not share your plugin key.",
+      ST_RELEASE_VERSION,obs_get_version_string(),f->connected?"Connected":f->terminal_paused?"Blocked by server":f->user_paused?"Paused":f->waiting_audio?"Waiting for audio":f->conflict_paused?"Another source active":"Connecting / disconnected",
+      f->audio_chunks_captured,f->audio_chunks_sent,
+      f->last_send_ns && now-f->last_send_ns<2000000000ULL?"within 2 seconds":"no recent delivery",
+      f->qcount,f->write_errors,f->resample_errors,f->last_close_code);
+    pthread_mutex_unlock(&f->qlock);
 }
 
 static obs_properties_t *st_get_properties(void *data)
@@ -711,13 +756,25 @@ static obs_properties_t *st_get_properties(void *data)
 		char line[420];
 		snprintf(line, sizeof(line), "%s%s", f->status[0] ? f->status : "Starting up ...",
 			 f->connected ? "" : "");
-		obs_property_set_long_description(st, line);
+		(void)st; /* No fake question-mark button: diagnostics has a real control. */
 		obs_data_t *s = obs_source_get_settings(f->context);
 		if (s) {
 			obs_data_set_string(s, "status_text", line);
 			obs_data_release(s);
 		}
 	}
+
+    obs_properties_add_button2(props, "show_diagnostics",
+        f && f->show_diagnostics ? "Hide diagnostics / help" : "Show diagnostics / help",
+        st_diagnostics_clicked, f);
+    obs_property_t *diagnostics = obs_properties_add_text(props, "diagnostics_text", "Diagnostics", OBS_TEXT_INFO);
+    obs_property_set_visible(diagnostics, f && f->show_diagnostics);
+    if (f) {
+        char diagnostic[1600]; st_diagnostic_text(f, diagnostic, sizeof(diagnostic));
+        obs_data_t *settings = obs_source_get_settings(f->context);
+        obs_data_set_string(settings,"diagnostics_text",diagnostic);
+        obs_data_release(settings);
+    }
 
 	obs_properties_add_button2(props, "stop_stream", "Stop (pause sending audio)",
 				   st_stop_clicked, f);
