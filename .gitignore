@@ -1,3 +1,9 @@
 /dist/
 /genhdr/
 /obs-headers/
+
+# Never commit signing credentials
+*.p12
+*.p8
+*.key
+*.keychain-db

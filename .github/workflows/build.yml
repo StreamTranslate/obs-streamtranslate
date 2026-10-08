@@ -25,8 +25,47 @@ jobs:
 
   build-macos:
     runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      MACOS_SIGNING_ENABLED: ${{ vars.MACOS_SIGNING_ENABLED }}
+      MACOS_TEAM_ID: ${{ vars.MACOS_TEAM_ID }}
+      MACOS_APPLICATION_IDENTITY: ${{ vars.MACOS_APPLICATION_IDENTITY }}
+      MACOS_INSTALLER_IDENTITY: ${{ vars.MACOS_INSTALLER_IDENTITY }}
+      MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/streamtranslate-signing.keychain-db
+      NOTARY_KEYCHAIN_PROFILE: streamtranslate-notary
     steps:
       - uses: actions/checkout@v4
+      - name: Import approved signing identities
+        if: env.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]] || { echo 'Signing requires the trusted main branch'; exit 1; }
+          : "${SIGNING_P12_BASE64:?Signing certificate secret missing}"
+          : "${SIGNING_P12_PASSWORD:?Signing password secret missing}"
+          : "${NOTARY_APPLE_ID:?Notarization Apple ID missing}"
+          : "${NOTARY_APP_PASSWORD:?Notarization password missing}"
+          : "${MACOS_TEAM_ID:?Signing team missing}"
+          : "${MACOS_APPLICATION_IDENTITY:?Application identity missing}"
+          : "${MACOS_INSTALLER_IDENTITY:?Installer identity missing}"
+          umask 077
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          printf '%s' "$SIGNING_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$MACOS_KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$MACOS_KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$MACOS_KEYCHAIN_PATH"
+          DEFAULT_KEYCHAIN=$(security default-keychain -d user | tr -d '"' | xargs)
+          security list-keychains -d user -s "$MACOS_KEYCHAIN_PATH" "$DEFAULT_KEYCHAIN"
+          security import "$RUNNER_TEMP/signing.p12" -k "$MACOS_KEYCHAIN_PATH" -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$MACOS_KEYCHAIN_PATH" >/dev/null
+          xcrun notarytool store-credentials "$NOTARY_KEYCHAIN_PROFILE" --keychain "$MACOS_KEYCHAIN_PATH" --apple-id "$NOTARY_APPLE_ID" --team-id "$MACOS_TEAM_ID" --password "$NOTARY_APP_PASSWORD"
+          rm -f "$RUNNER_TEMP/signing.p12"
       - name: Install dependencies
         run: brew install libwebsockets pkg-config simde
       - name: Fetch pinned macOS 14-compatible bundled libraries
@@ -93,6 +132,9 @@ jobs:
           echo "--- final link check ---"
           otool -L "$BIN"
           otool -L "$FW/libwebsockets.22.dylib"
+      - name: Sign plugin with Developer ID
+        if: env.MACOS_SIGNING_ENABLED == 'true'
+        run: bash scripts/macos-sign.sh dist/obs-streamtranslate.plugin
       - name: Build branded .pkg installer
         run: |
           # OBS on Apple Silicon ONLY scans ~/Library/Application Support/obs-studio/plugins
@@ -124,6 +166,14 @@ jobs:
             --resources installer \
             --package-path . \
             out/StreamTranslate-OBS-Plugin.pkg
+      - name: Sign, notarize and staple installer
+        if: env.MACOS_SIGNING_ENABLED == 'true'
+        run: bash scripts/macos-notarize.sh out/StreamTranslate-OBS-Plugin.pkg
+      - name: Clean up signing material
+        if: always() && env.MACOS_SIGNING_ENABLED == 'true'
+        run: |
+          security delete-keychain "$MACOS_KEYCHAIN_PATH" || true
+          rm -f "$RUNNER_TEMP/signing.p12"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
