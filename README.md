@@ -25,21 +25,9 @@ Grab the latest build from [Releases](https://github.com/StreamTranslate/obs-str
 
 ### macOS
 
-Open the `.pkg`. macOS will block it the first time because the plugin isn't
-signed with an Apple Developer certificate yet.
-
-**Without Terminal:** double-click the .pkg, let it get blocked, then go to
-**System Settings → Privacy & Security**, scroll to the bottom, and click
-**Open Anyway**. Run the installer again.
-
-On recent macOS versions right-click → Open does *not* work for .pkg files —
-use the steps above.
-
-**With Terminal:**
-```bash
-xattr -d com.apple.quarantine ~/Downloads/StreamTranslate-OBS-Plugin.pkg
-```
-then open the .pkg normally.
+Quit OBS, open the signed and Apple-notarized `.pkg`, finish installation,
+then reopen OBS. A normal administrator-password prompt may appear.
+If macOS reports that the installer cannot be verified, contact support.
 
 Restart OBS after installing.
 
@@ -133,3 +121,12 @@ restart OBS. Website/server updates do not require reinstalling the plugin.
 
 Audio is only sent while the filter is enabled and the source is unmuted.
 Muting in OBS stops transmission immediately.
+
+## Preparing a signed macOS release
+
+CI builds the package input. Before publishing a release, sign the plugin with
+`scripts/macos-sign.sh`, build the installer from that signed payload, and run
+`scripts/macos-notarize.sh` on the installer. The latter requires Apple to return
+Accepted, staples the ticket, and checks Gatekeeper before producing a release
+package. Keep Developer ID keys and notarization credentials in the signing
+keychain; raw CI Mac installers are not release downloads.
