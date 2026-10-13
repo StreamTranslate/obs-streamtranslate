@@ -105,9 +105,9 @@ jobs:
           # (the /Library system path is Intel-legacy, compiled out on arm64 — see
           # OBSBasic.cpp AddExtraModulePaths). Payload lands in a neutral spot and a
           # postinstall script copies it into the logged-in user's home plugins dir.
-          mkdir -p "pkgroot/Library/Application Support/StreamTranslate" out scripts
+          mkdir -p "pkgroot/Library/Application Support/StreamTranslate" out pkg-scripts
           cp -R dist/obs-streamtranslate.plugin "pkgroot/Library/Application Support/StreamTranslate/"
-          cat > scripts/postinstall << 'SCRIPT'
+          cat > pkg-scripts/postinstall << 'SCRIPT'
           #!/bin/bash
           loggedInUser=$(stat -f%Su /dev/console)
           [ -z "$loggedInUser" ] || [ "$loggedInUser" = "root" ] && loggedInUser=$(ls -l /dev/console | awk '{print $3}')
@@ -119,11 +119,11 @@ jobs:
           chown -R "$loggedInUser" "$dest/obs-streamtranslate.plugin"
           exit 0
           SCRIPT
-          chmod +x scripts/postinstall
+          chmod +x pkg-scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
             --version 0.1.9 \
-            --scripts scripts \
+            --scripts pkg-scripts \
             --install-location "/" \
             component.pkg
           productbuild --distribution installer/distribution.xml \
