@@ -12,16 +12,22 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config libobs-dev libwebsockets-dev libssl-dev
+          sudo apt-get install -y build-essential cmake pkg-config libobs-dev libssl-dev
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DST_STATIC_LIBWEBSOCKETS=ON
       - name: Build
         run: cmake --build build --verbose
+      - name: Verify no shared libwebsockets dependency
+        run: |
+          bash tests/static-lws-checker.test.sh
+          bash scripts/check-static-lws.sh build/obs-streamtranslate.so
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-streamtranslate-linux
-          path: build/obs-streamtranslate.so
+          path: |
+            build/obs-streamtranslate.so
+            third-party/libwebsockets-LICENSE.txt
 
   build-macos:
     runs-on: macos-26
@@ -193,15 +199,18 @@ jobs:
             /link /LIBPATH:%VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib /LIBPATH:. ^
             obs.lib w32-pthreads.lib websockets.lib libssl.lib libcrypto.lib libuv.lib zlib.lib ^
             ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib psapi.lib ole32.lib shell32.lib dbghelp.lib
+      - name: Test Windows packaging
+        run: python tests/windows-package.test.py
       - name: Package zip
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "pkg/obs-plugins/64bit" | Out-Null
-          Copy-Item obs-streamtranslate.dll pkg/obs-plugins/64bit/
-          Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile pkg/obs-plugins/64bit/cacert.pem
-          Compress-Archive -Path pkg/* -DestinationPath StreamTranslate-OBS-Plugin-Windows.zip
+          Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile cacert.pem
+          python scripts/package-windows.py --dll obs-streamtranslate.dll --certificates cacert.pem --output dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-streamtranslate-windows-x64
-          path: StreamTranslate-OBS-Plugin-Windows.zip
+          path: |
+            dist/StreamTranslate-OBS-Plugin-Windows.zip
+            dist/StreamTranslate-OBS-Plugin-Windows-OBS32-Portable.zip
