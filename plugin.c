@@ -36,7 +36,7 @@ OBS_DECLARE_MODULE()
 
 #include "retry-policy.h"
 #define ST_PLUGIN_VERSION "capture-health-v2"
-#define ST_RELEASE_VERSION "0.1.9"
+#define ST_RELEASE_VERSION "0.1.11"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
 #elif defined(__APPLE__)
@@ -542,7 +542,9 @@ static void st_update(void *data, obs_data_t *settings)
 	const char *server = obs_data_get_string(settings, "server");
 	const char *key = obs_data_get_string(settings, "plugin_key");
 
-	bool stereo = obs_data_get_bool(settings, "stereo_split");
+	/* Two-speaker capture is experimental and must not activate in public builds,
+	   including when an older OBS scene has stereo_split=true saved. */
+	bool stereo = false;
 
 	bool changed = strcmp(f->server, server ? server : "") != 0 ||
 		       strcmp(f->plugin_key, key ? key : "") != 0 ||
@@ -742,13 +744,6 @@ static obs_properties_t *st_get_properties(void *data)
 				OBS_TEXT_PASSWORD);
 	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
 
-	obs_property_t *two = obs_properties_add_bool(props, "stereo_split",
-		"Two-speaker mode (stereo split)");
-	obs_property_set_long_description(two,
-		"For a dual wireless mic receiver in SPLIT mode (Rode Wireless GO II, DJI Mic 2):\n"
-		"transmitter 1 on the left channel, transmitter 2 on the right.\n"
-		"Each speaker gets its own captions, labelled Mic 1 and Mic 2 on your overlay.\n"
-		"Leave off for a single microphone.");
 
 	/* live status — updated by the connection thread */
 	obs_property_t *st = obs_properties_add_text(props, "status_text", "Status", OBS_TEXT_INFO);

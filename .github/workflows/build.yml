@@ -77,7 +77,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>live.streamtranslate.obs-plugin</string>
             <key>CFBundleExecutable</key><string>obs-streamtranslate</string>
             <key>CFBundlePackageType</key><string>BNDL</string>
-            <key>CFBundleVersion</key><string>0.1.10</string>
+            <key>CFBundleVersion</key><string>0.1.11</string>
           </dict>
           </plist>
           PLIST
@@ -122,7 +122,7 @@ jobs:
           chmod +x pkg-scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
-            --version 0.1.10 \
+            --version 0.1.11 \
             --scripts pkg-scripts \
             --install-location "/" \
             component.pkg

@@ -19,6 +19,11 @@ Two pieces, and they do different jobs:
 
 Filter = the microphone. Browser source = the screen.
 
+Public releases use one combined audio/caption stream. Two-speaker mode is not
+available yet. Version 0.1.11 removes its unfinished checkbox and ignores an
+older saved stereo-split setting. Separate development builds are for staging
+tests only; they are not part of these downloads.
+
 ## Install
 
 Grab the latest build from [Releases](https://github.com/StreamTranslate/obs-streamtranslate/releases/latest).
