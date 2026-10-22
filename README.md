@@ -24,6 +24,31 @@ available yet. Version 0.1.11 removes its unfinished checkbox and ignores an
 older saved stereo-split setting. Separate development builds are for staging
 tests only; they are not part of these downloads.
 
+## Version and update notice (0.1.12 candidate)
+
+The filter properties show the installed plugin version, a **Check for updates**
+button and a link to the official downloads/release notes. A newer stable release
+shows an **Update available** notice. Install updates only when not streaming,
+then restart OBS. This does not automatically install or restart anything.
+
+The check reads public GitHub release metadata once when OBS loads the plugin.
+Manual checks share a 15-minute cooldown across filters. It runs separately from
+audio capture and transport, with a bounded response and network timeout. If the
+check fails or GitHub rate-limits it, the UI says it could not check; it never
+claims that the installed version is current based on a failed request.
+No Plugin Key, account identity, captions or audio are included in the request.
+GitHub receives an ordinary HTTPS connection and generic plugin user-agent.
+The optional checker uses system `curl` without a shell or user curl configuration;
+the child process is terminated at the parent deadline or when OBS unloads the
+plugin, including if DNS resolution stalls. macOS and current Windows include
+curl; Linux/cloud images need `/usr/bin/curl` (for example, the distro `curl`
+package). If unavailable, captions still work and the downloads link remains.
+
+Older installed versions cannot acquire this UI remotely: users must install
+the new plugin once. Cloud OBS users without a browser can copy this URL to their
+own device: https://github.com/StreamTranslate/obs-streamtranslate/releases/latest.
+This candidate has not been published or installed by this change.
+
 ## Install
 
 Grab the latest build from [Releases](https://github.com/StreamTranslate/obs-streamtranslate/releases/latest).

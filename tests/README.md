@@ -1,5 +1,27 @@
 # Native capture regression harness
 
+## Update-notice regressions
+
+`update-policy.test.c` tests stable numeric version ordering and rejects malformed,
+prerelease, markup and oversized versions. It is standalone C11.
+`native-update-harness.c` uses real libobs properties and the actual curl child.
+Start `python3 tests/update-server.py` on localhost:8797, then run the harness.
+It covers newer/equal/older releases, invalid or draft/prerelease metadata,
+HTTP errors, redirects, overlarge/NUL/malformed payloads, timeout, fixed download
+URL, no audio state changes, shared request deduplication and worker shutdown.
+The fixture asserts that no Authorization or Cookie header is sent. The
+production endpoint and HTTPS-only default are asserted before a test-only local
+URL override. No account, speech provider or customer audio is used.
+Set `ST_STUCK_HELPER` to the absolute path of a local executable that sleeps for
+120 seconds (ignoring its arguments). This proves the parent kills a stuck
+DNS/network process at its deadline and promptly on shutdown. The executable and
+HTTP fixture overrides exist only with `ST_UPDATE_TEST_MODE`, not plugin builds.
+Build like the native audio harness below. Passing any argument instead makes
+one read-only HTTPS check against the public GitHub release API.
+
+Neither the native harness nor a successful compile proves a signed/notarized
+installer, physical-device streaming, or Windows/Linux runtime acceptance.
+
 `native-audio-harness.c` uses real libobs and the plugin implementation with a generated 48kHz stereo source (speech-like signal only on the right). Its compile-time test wrapper redirects the transport to localhost:8796, without changing the production TLS code. No hardware, account, provider, or user OBS profile is used.
 
 Run the StreamTranslate branch's `scripts/test-native-audio.cjs` first, then this harness. It injects a second filter with no callbacks, mute/unmute, a 28-second callback interruption and a forced server-side TCP disconnect. Results go to `/tmp/st-native-audio-results.json`; OBS log goes to stdout. Wait for the server's 115-second completion before analyzing.

@@ -36,7 +36,7 @@ OBS_DECLARE_MODULE()
 
 #include "retry-policy.h"
 #define ST_PLUGIN_VERSION "capture-health-v2"
-#define ST_RELEASE_VERSION "0.1.11"
+#define ST_RELEASE_VERSION "0.1.12"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
 #elif defined(__APPLE__)
@@ -424,6 +424,8 @@ static const char *st_ca_bundle_path(void)
 	return path[0] ? path : NULL;
 }
 
+#include "update-check.h"
+
 static void st_service_pulse(lws_sorted_usec_list_t *sul)
 {
     struct st_filter *f=lws_container_of(sul,struct st_filter,service_pulse);
@@ -739,6 +741,8 @@ static obs_properties_t *st_get_properties(void *data)
 	struct st_filter *f = data;
 	obs_properties_t *props = obs_properties_create();
 
+    st_update_properties(props, f);
+
 	obs_properties_add_text(props, "plugin_key",
 				"Plugin Key (from your StreamTranslate account)",
 				OBS_TEXT_PASSWORD);
@@ -800,7 +804,13 @@ static struct obs_source_info st_filter_info = {
 
 bool obs_module_load(void)
 {
+	st_updates_start();
 	obs_register_source(&st_filter_info);
 	blog(LOG_INFO, "[streamtranslate] plugin loaded");
 	return true;
+}
+
+void obs_module_unload(void)
+{
+    st_updates_stop();
 }
