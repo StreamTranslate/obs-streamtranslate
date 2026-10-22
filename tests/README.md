@@ -4,14 +4,18 @@
 
 `update-policy.test.c` tests stable numeric version ordering and rejects malformed,
 prerelease, markup and oversized versions. It is standalone C11.
-`native-update-harness.c` uses real libobs properties and the actual HTTP client.
+`native-update-harness.c` uses real libobs properties and the actual curl child.
 Start `python3 tests/update-server.py` on localhost:8797, then run the harness.
 It covers newer/equal/older releases, invalid or draft/prerelease metadata,
 HTTP errors, redirects, overlarge/NUL/malformed payloads, timeout, fixed download
 URL, no audio state changes, shared request deduplication and worker shutdown.
 The fixture asserts that no Authorization or Cookie header is sent. The
-production client host, TLS flags and path are asserted before a test-only local
-transport override. No account, speech provider or customer audio is used.
+production endpoint and HTTPS-only default are asserted before a test-only local
+URL override. No account, speech provider or customer audio is used.
+Set `ST_STUCK_HELPER` to the absolute path of a local executable that sleeps for
+120 seconds (ignoring its arguments). This proves the parent kills a stuck
+DNS/network process at its deadline and promptly on shutdown. The executable and
+HTTP fixture overrides exist only with `ST_UPDATE_TEST_MODE`, not plugin builds.
 Build like the native audio harness below. Passing any argument instead makes
 one read-only HTTPS check against the public GitHub release API.
 

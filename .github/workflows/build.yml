@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
+permissions:
+  contents: read
 
 jobs:
   build-linux:
@@ -201,6 +204,23 @@ jobs:
             ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib psapi.lib ole32.lib shell32.lib dbghelp.lib
       - name: Test Windows packaging
         run: python tests/windows-package.test.py
+      - name: Compile Windows update-process regression
+        shell: cmd
+        run: |
+          cl /nologo /O2 tests/update-fast-helper.c /Fe:update-fast-helper.exe
+          cl /nologo /O2 /MT /std:c17 tests/windows-update-drain-harness.c ^
+            /I obs-studio\libobs /I genhdr ^
+            /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
+            /Fe:windows-update-drain.exe ^
+            /link /LIBPATH:%VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\lib /LIBPATH:. ^
+            obs.lib w32-pthreads.lib websockets.lib libssl.lib libcrypto.lib libuv.lib zlib.lib ^
+            ws2_32.lib crypt32.lib bcrypt.lib user32.lib advapi32.lib iphlpapi.lib userenv.lib secur32.lib psapi.lib ole32.lib shell32.lib dbghelp.lib
+      - name: Verify Windows final pipe-byte drain
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\obs-win\bin\64bit;$env:PATH"
+          & .\windows-update-drain.exe "$PWD\update-fast-helper.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package zip
         shell: pwsh
         run: |

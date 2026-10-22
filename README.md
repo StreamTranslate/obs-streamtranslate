@@ -38,6 +38,11 @@ check fails or GitHub rate-limits it, the UI says it could not check; it never
 claims that the installed version is current based on a failed request.
 No Plugin Key, account identity, captions or audio are included in the request.
 GitHub receives an ordinary HTTPS connection and generic plugin user-agent.
+The optional checker uses system `curl` without a shell or user curl configuration;
+the child process is terminated at the parent deadline or when OBS unloads the
+plugin, including if DNS resolution stalls. macOS and current Windows include
+curl; Linux/cloud images need `/usr/bin/curl` (for example, the distro `curl`
+package). If unavailable, captions still work and the downloads link remains.
 
 Older installed versions cannot acquire this UI remotely: users must install
 the new plugin once. Cloud OBS users without a browser can copy this URL to their
