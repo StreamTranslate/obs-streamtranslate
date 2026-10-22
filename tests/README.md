@@ -1,5 +1,23 @@
 # Native capture regression harness
 
+## Update-notice regressions
+
+`update-policy.test.c` tests stable numeric version ordering and rejects malformed,
+prerelease, markup and oversized versions. It is standalone C11.
+`native-update-harness.c` uses real libobs properties and the actual HTTP client.
+Start `python3 tests/update-server.py` on localhost:8797, then run the harness.
+It covers newer/equal/older releases, invalid or draft/prerelease metadata,
+HTTP errors, redirects, overlarge/NUL/malformed payloads, timeout, fixed download
+URL, no audio state changes, shared request deduplication and worker shutdown.
+The fixture asserts that no Authorization or Cookie header is sent. The
+production client host, TLS flags and path are asserted before a test-only local
+transport override. No account, speech provider or customer audio is used.
+Build like the native audio harness below. Passing any argument instead makes
+one read-only HTTPS check against the public GitHub release API.
+
+Neither the native harness nor a successful compile proves a signed/notarized
+installer, physical-device streaming, or Windows/Linux runtime acceptance.
+
 `native-audio-harness.c` uses real libobs and the plugin implementation with a generated 48kHz stereo source (speech-like signal only on the right). Its compile-time test wrapper redirects the transport to localhost:8796, without changing the production TLS code. No hardware, account, provider, or user OBS profile is used.
 
 Run the StreamTranslate branch's `scripts/test-native-audio.cjs` first, then this harness. It injects a second filter with no callbacks, mute/unmute, a 28-second callback interruption and a forced server-side TCP disconnect. Results go to `/tmp/st-native-audio-results.json`; OBS log goes to stdout. Wait for the server's 115-second completion before analyzing.

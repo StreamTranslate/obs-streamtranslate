@@ -1,0 +1,20 @@
+name: Update notice policy
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  policy-and-packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stable-version policy (sanitizers)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+            tests/update-policy.test.c -o /tmp/update-policy-test
+          /tmp/update-policy-test
+      - name: Packaging regressions
+        run: |
+          python3 tests/windows-package.test.py
+          bash tests/static-lws-checker.test.sh
