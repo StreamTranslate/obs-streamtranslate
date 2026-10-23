@@ -35,6 +35,7 @@
 OBS_DECLARE_MODULE()
 
 #include "retry-policy.h"
+#include "ca-path.h"
 #define ST_PLUGIN_VERSION "capture-health-v2"
 #define ST_RELEASE_VERSION "0.1.12"
 #ifdef _WIN32
@@ -448,39 +449,46 @@ static const char *st_ca_bundle_path(void)
 				       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 			       (LPCSTR)&st_ca_bundle_path, &hm)) {
 		char mod[1024];
-		if (GetModuleFileNameA(hm, mod, sizeof(mod))) {
+        DWORD length = GetModuleFileNameA(hm, mod, sizeof(mod));
+        if (length > 0 && length < sizeof(mod)) {
 			char *slash = strrchr(mod, '\\');
 			if (slash) {
 				*slash = 0;
-				snprintf(path, sizeof(path), "%s\\cacert.pem", mod);
+				st_checked_path_join(path, sizeof(path), mod, "\\cacert.pem");
 			}
 		}
 	}
 #else
-	Dl_info dli;
-	if (dladdr((void *)&st_ca_bundle_path, &dli) && dli.dli_fname) {
-		char mod[1024];
-		snprintf(mod, sizeof(mod), "%s", dli.dli_fname);
-		char *slash = strrchr(mod, '/');
-		if (slash) {
-			*slash = 0;
-			/* macOS bundle: .../Contents/MacOS -> .../Contents/Resources/cacert.pem */
-			char *macos = strstr(mod, "/Contents/MacOS");
-			if (macos) {
-				*macos = 0;
-				snprintf(path, sizeof(path), "%s/Contents/Resources/cacert.pem", mod);
-			} else {
-				snprintf(path, sizeof(path), "%s/cacert.pem", mod);
-			}
-		}
-	}
-	if (path[0] && access(path, R_OK) != 0) {
-		/* fall back to common system stores (Linux/cloud OBS) */
-		if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
-			snprintf(path, sizeof(path), "/etc/ssl/certs/ca-certificates.crt");
-		else
-			path[0] = 0;
-	}
+    Dl_info dli;
+    bool rejected_path = false;
+    if (dladdr((void *)&st_ca_bundle_path, &dli) && dli.dli_fname) {
+        char mod[1024];
+        if (!st_checked_path_join(mod, sizeof(mod), dli.dli_fname, "")) {
+            rejected_path = true;
+        } else {
+            char *slash = strrchr(mod, '/');
+            if (slash) {
+                *slash = 0;
+                /* macOS bundle: .../Contents/MacOS -> .../Contents/Resources/cacert.pem */
+                char *macos = strstr(mod, "/Contents/MacOS");
+                if (macos) {
+                    *macos = 0;
+                    rejected_path = !st_checked_path_join(path, sizeof(path), mod,
+                                                         "/Contents/Resources/cacert.pem");
+                } else {
+                    rejected_path = !st_checked_path_join(path, sizeof(path), mod, "/cacert.pem");
+                }
+            }
+        }
+    }
+    if (rejected_path || (path[0] && access(path, R_OK) != 0)) {
+        /* Keep the existing readable canonical Linux store; never use a
+         * truncated candidate or relax certificate verification. */
+        if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
+            st_checked_path_join(path, sizeof(path), "/etc/ssl/certs/ca-certificates.crt", "");
+        else
+            path[0] = 0;
+    }
 #endif
 	if (path[0])
 		blog(LOG_INFO, "[streamtranslate] CA bundle: %s", path);
