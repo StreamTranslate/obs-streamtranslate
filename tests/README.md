@@ -50,3 +50,21 @@ The plugin reports numerical channel peaks, callback/conversion/delivery counter
 `native-retry-harness.c` plus `retry-server.cjs` runs the actual libobs/resampler/WebSocket path. It verifies 4008 and 4403 stay paused until Reconnect, 4010 does not retry silent callbacks, real PCM wakes the no-input pause, and 1012 reconnects with delivered PCM. Build like the native audio harness; run the server then the harness (about 30 seconds). The status after an idle shutdown requires an explicit Reconnect, matching Control's deliberate idle stop.
 
 `native-speech-harness.c` loops a generated 16kHz mono PCM fixture through the actual plugin's right-channel 48kHz input; a test proxy can inject a TCP break and observe translated captions from a QA room. This is synthetic input, not physical capture-card validation.
+
+## Explicit native Stop intent
+
+`native-stop-harness.c` drives real libobs audio/resampling and the candidate
+WebSocket client against a loopback-only server. It proves that Stop sends the
+bounded `capture_stop` v1 control before a graceful close, clears queued PCM,
+stays paused, and resumes only after Reconnect. Two Stop clicks produce one
+message. The server accepts this only on the admitted, current plugin socket;
+a retired filter cannot stop a replacement. Missing delivery stays unknown,
+not inferred owner intent. The change is not installed or released. Normal OBS
+quit/filter removal is deliberately not labeled a physical user action by this
+protocol.
+
+Run the integration fixture with
+`ST_SERVER_ROOT=/absolute/path/to/server node tests/stop-server.cjs`, then the
+compiled `native-stop-harness` (same build flags as the retry harness). It uses
+the actual server control parser and Defender module, not a mock Stop handler.
+Both processes exit after a bounded test and never contact production.

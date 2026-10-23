@@ -79,7 +79,9 @@ struct st_filter {
 	bool conflict_paused;
 	bool terminal_paused, waiting_audio;
 	uint64_t retry_after_audio_ns, last_usable_audio_ns;
-	bool user_paused; /* Stop button in the filter properties -- not saved to settings */
+	bool user_paused; /* protected by qlock; not saved to settings */
+    unsigned stop_phase; /* 0=none, 1=send intent, 2=graceful close; qlock */
+    uint64_t stop_deadline_ns;
 
 
 	/* audio conversion */
@@ -168,6 +170,14 @@ static void st_health_snapshot(struct st_filter *f)
     f->health_count++;
 }
 
+static bool st_user_paused(struct st_filter *f)
+{
+    pthread_mutex_lock(&f->qlock);
+    bool paused = f->user_paused;
+    pthread_mutex_unlock(&f->qlock);
+    return paused;
+}
+
 /* ---------------- queue ---------------- */
 
 static void st_queue_clear(struct st_filter *f)
@@ -200,6 +210,10 @@ static void st_queue_push(struct st_filter *f, const unsigned char *data, size_t
 	c->next = NULL;
 
 	pthread_mutex_lock(&f->qlock);
+    if (f->user_paused) {
+        pthread_mutex_unlock(&f->qlock);
+        free(c->buf); free(c); return;
+    }
 	if (f->qcount >= ST_QUEUE_MAX && f->qhead) {
 		struct st_chunk *old = f->qhead;
 		f->qhead = old->next;
@@ -248,14 +262,38 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	switch (reason) {
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
         f->connected = true;
-        st_set_status(f, "Connected to %s - streaming audio", f->server);
+        if (!st_user_paused(f)) st_set_status(f, "Connected to %s - streaming audio", f->server);
 		f->last_health_ns=0;
 		st_health_snapshot(f);
 		lws_callback_on_writable(wsi);
 		break;
 
 	case LWS_CALLBACK_CLIENT_WRITEABLE: {
-        if (f->user_paused) { st_queue_clear(f); return 0; }
+        // Stop has priority over health/PCM. All socket operations stay on this
+        // service thread; the UI only marks intent and cancels the service wait.
+        pthread_mutex_lock(&f->qlock);
+        unsigned phase = f->stop_phase;
+        bool paused = f->user_paused;
+        if (phase == 1 && paused) {
+            static const char intent[] = "{\"type\":\"capture_stop\",\"v\":1,\"reason\":\"stop_button\"}";
+            unsigned char payload[LWS_PRE + sizeof(intent)];
+            memcpy(payload + LWS_PRE, intent, sizeof(intent) - 1);
+            int wrote = lws_write(wsi, payload + LWS_PRE, sizeof(intent) - 1, LWS_WRITE_TEXT);
+            f->stop_phase = 2;
+            pthread_mutex_unlock(&f->qlock);
+            if (wrote != (int)(sizeof(intent) - 1)) return -1;
+            lws_callback_on_writable(wsi);
+            return 0;
+        }
+        if (phase == 2 && paused) {
+            f->stop_phase = 0;
+            pthread_mutex_unlock(&f->qlock);
+            unsigned char reason[] = "capture_stopped";
+            lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL, reason, sizeof(reason) - 1);
+            return -1;
+        }
+        pthread_mutex_unlock(&f->qlock);
+        if (paused) { st_queue_clear(f); return 0; }
         if(f->health_count){
             unsigned char payload[LWS_PRE+2048];
             const char *text=f->health_ring[f->health_read];size_t size=strlen(text);
@@ -273,8 +311,16 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         }
         struct st_chunk *c = st_queue_pop(f);
 		if (c) {
-			int wrote = lws_write(wsi, c->buf + LWS_PRE, c->len, LWS_WRITE_BINARY);
+            // Serialize the final write check with Stop. A chunk popped just
+            // before Stop cannot escape after the button handler returns.
             pthread_mutex_lock(&f->qlock);
+            if (f->user_paused) {
+                pthread_mutex_unlock(&f->qlock);
+                free(c->buf); free(c);
+                lws_callback_on_writable(wsi);
+                return 0;
+            }
+			int wrote = lws_write(wsi, c->buf + LWS_PRE, c->len, LWS_WRITE_BINARY);
             if(wrote==(int)c->len){f->audio_chunks_sent++;f->written_bytes+=wrote;f->last_send_ns=os_gettime_ns();}
             else f->write_errors++;
             pthread_mutex_unlock(&f->qlock);
@@ -293,7 +339,10 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-		if (!f->user_paused) st_set_status(f, "Connection FAILED: %s (server: %s) - retrying",
+        pthread_mutex_lock(&f->qlock);
+        f->stop_phase = 0; f->stop_deadline_ns = 0;
+        pthread_mutex_unlock(&f->qlock);
+		if (!st_user_paused(f)) st_set_status(f, "Connection FAILED: %s (server: %s) - retrying",
 			      in ? (const char *)in : "unknown error", f->server);
 		f->connected = false;
 		f->wsi = NULL;
@@ -314,8 +363,11 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         }
         break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
+        pthread_mutex_lock(&f->qlock);
+        f->stop_phase = 0; f->stop_deadline_ns = 0;
+        pthread_mutex_unlock(&f->qlock);
         st_queue_clear(f);
-		if (f->user_paused) st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
+		if (st_user_paused(f)) st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
         else if(!f->conflict_paused && !f->terminal_paused && !f->waiting_audio) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
@@ -459,7 +511,7 @@ static void *st_ws_thread(void *arg)
         if(f->waiting_audio && st_audio_can_retry(f->last_usable_audio_ns,f->retry_after_audio_ns,os_gettime_ns())) f->waiting_audio=false;
         bool waiting_audio=f->waiting_audio;
         pthread_mutex_unlock(&f->qlock);
-        if (!f->wsi && !f->conflict_paused && !f->user_paused && !f->terminal_paused && !waiting_audio) {
+        if (!f->wsi && !f->conflict_paused && !st_user_paused(f) && !f->terminal_paused && !waiting_audio) {
 			uint64_t now = os_gettime_ns();
 			if (now >= next_retry) {
 				st_connect(f);
@@ -470,18 +522,23 @@ static void *st_ws_thread(void *arg)
 		 * (Relying on lws_cancel_service from the audio thread proved unreliable:
 		 * the socket connected but never sent a byte, so the server's watchdog
 		 * closed the silent connection after ~30s.) */
-		if (f->wsi && f->connected) {
-			pthread_mutex_lock(&f->qlock);
-			int pending = f->qcount;
-			pthread_mutex_unlock(&f->qlock);
-			if (pending > 0 || f->health_count > 0)
-				lws_callback_on_writable(f->wsi);
-		}
+        pthread_mutex_lock(&f->qlock);
+        int pending = f->qcount;
+        unsigned stop_phase = f->stop_phase;
+        uint64_t deadline = f->stop_deadline_ns;
+        pthread_mutex_unlock(&f->qlock);
+        if (f->wsi && deadline && os_gettime_ns() >= deadline) {
+            // Includes an unfinished handshake: Stop must remain bounded even
+            // when the peer never becomes writeable. No receipt is claimed.
+            lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+        } else if (f->wsi && f->connected && (pending > 0 || f->health_count > 0 || stop_phase)) {
+            lws_callback_on_writable(f->wsi);
+        }
 		lws_service(f->lws_ctx, 20);
 
 		/* refresh the status line with live counters once a second */
 		uint64_t now2 = os_gettime_ns();
-		if (f->connected && !f->muted_now && now2 - last_status > 15000000000ULL) {
+		if (f->connected && !st_user_paused(f) && !f->muted_now && now2 - last_status > 15000000000ULL) {
 			last_status = now2;
 			st_set_status(f, "Connected to %s - captured %d, sent %d audio chunks",
 				      f->server, f->audio_chunks_captured, f->audio_chunks_sent);
@@ -612,7 +669,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
     f->left_peak=0;f->right_peak=0;
     if(audio){for(size_t ch=0;ch<2;ch++){if(!audio->data[ch])continue;double peak=0;const float *samples=(const float*)audio->data[ch];for(uint32_t i=0;i<audio->frames;i++){double v=fabs(samples[i]);if(isfinite(v)&&v>peak)peak=v;}if(ch==0)f->left_peak=peak;else f->right_peak=peak;}}
     pthread_mutex_unlock(&f->qlock);
-    if (!audio || !audio->frames || f->user_paused) return audio;
+    if (!audio || !audio->frames || st_user_paused(f)) return audio;
 
 	/* OBS applies a source's mute AFTER its filter chain, so a muted mic still
 	 * reaches us. Without this check a streamer who mutes for a private moment
@@ -674,14 +731,16 @@ static bool st_stop_clicked(obs_properties_t *props, obs_property_t *prop, void 
 	(void)prop;
 	if (!f)
 		return false;
-	f->user_paused = true;
-	st_queue_clear(f);
-	st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
-	if (f->wsi) {
-		/* Force the live socket closed now instead of waiting for it to time out,
-		 * so the pause takes effect immediately. */
-		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
-	}
+	pthread_mutex_lock(&f->qlock);
+    bool was_paused = f->user_paused;
+    f->user_paused = true;
+    if (!was_paused) {
+        f->stop_phase = 1;
+        f->stop_deadline_ns = os_gettime_ns() + 2000000000ULL;
+    }
+    pthread_mutex_unlock(&f->qlock);
+    st_queue_clear(f);
+    st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
 	return true;
@@ -698,7 +757,9 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
     f->terminal_paused=false;
     f->last_close_code=0;
     pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
-	f->user_paused=false;
+    pthread_mutex_lock(&f->qlock);
+    f->user_paused=false; f->stop_phase=0; f->stop_deadline_ns=0;
+    pthread_mutex_unlock(&f->qlock);
 	st_set_status(f, "Reconnecting ...");
 	if (f->wsi) {
 		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
