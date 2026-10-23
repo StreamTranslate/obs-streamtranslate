@@ -3,7 +3,7 @@ static struct lws *test_connect(const struct lws_client_connect_info *);
 #define lws_client_connect_via_info test_connect
 #include "../plugin.c"
 #undef lws_client_connect_via_info
-static struct lws *test_connect(const struct lws_client_connect_info *source){struct lws_client_connect_info ci=*source;ci.port=8796;ci.ssl_connection=0;ci.address="127.0.0.1";ci.host="127.0.0.1";return lws_client_connect_via_info(&ci);}
+static struct lws *test_connect(const struct lws_client_connect_info *source){static unsigned calls; if(++calls==4)os_sleep_ms(900);struct lws_client_connect_info ci=*source;ci.port=8796;ci.ssl_connection=0;ci.address="127.0.0.1";ci.host="127.0.0.1";return lws_client_connect_via_info(&ci);}
 static const char *name(void *x){(void)x;return "Synthetic HDMI audio";}
 static void *make_source(obs_data_t *settings,obs_source_t *context){(void)settings;return context;}
 static void free_source(void *data){(void)data;}
@@ -16,7 +16,21 @@ static struct ui_job *ui_jobs;
 static void test_queue_ui(obs_task_t task,void *param,bool wait){assert(!wait);struct ui_job *job=calloc(1,sizeof(*job));job->task=task;job->param=param;pthread_mutex_lock(&ui_lock);struct ui_job **end=&ui_jobs;while(*end)end=&(*end)->next;*end=job;pthread_mutex_unlock(&ui_lock);}
 static void test_pump_ui(void){pthread_mutex_lock(&ui_lock);struct ui_job *jobs=ui_jobs;ui_jobs=NULL;pthread_mutex_unlock(&ui_lock);while(jobs){struct ui_job *next=jobs->next;jobs->task(jobs->param);free(jobs);jobs=next;}}
 
+static void test_bounded_queue(void){
+ struct st_filter f={0};pthread_mutex_init(&f.qlock,NULL);unsigned char pcm[32]={0};
+ st_queue_push(&f,pcm,sizeof(pcm));assert(f.qcount==1);
+ f.qhead->captured_ns=os_gettime_ns()-ST_QUEUE_MAX_AGE_NS-1;
+ assert(st_queue_pop(&f)==NULL && f.qcount==0 && f.queue_drops==1);
+ f.terminal_paused=true;st_queue_push(&f,pcm,sizeof(pcm));assert(f.qcount==0);
+ f.terminal_paused=false;f.conflict_paused=true;st_queue_push(&f,pcm,sizeof(pcm));assert(f.qcount==0);
+ f.conflict_paused=false;f.user_paused=true;st_queue_push(&f,pcm,sizeof(pcm));assert(f.qcount==0);
+ f.user_paused=false;
+ for(int i=0;i<ST_QUEUE_MAX+9;i++)st_queue_push(&f,pcm,sizeof(pcm));
+ assert(f.qcount==ST_QUEUE_MAX && f.queue_drops==10);
+ st_queue_clear(&f);assert(f.qcount==0 && !f.qhead && !f.qtail);pthread_mutex_destroy(&f.qlock);
+}
 int main(void){
+ test_bounded_queue();
  assert(obs_startup("en-US",NULL,NULL));obs_set_ui_task_handler(test_queue_ui);test_pump_ui();
  struct obs_audio_info ai={.samples_per_sec=48000,.speakers=SPEAKERS_STEREO};assert(obs_reset_audio(&ai));
  struct obs_source_info src={.id="qa_audio",.type=OBS_SOURCE_TYPE_INPUT,.output_flags=OBS_SOURCE_AUDIO,.get_name=name,.create=make_source,.destroy=free_source};obs_register_source(&src);obs_register_source(&st_filter_info);
@@ -27,8 +41,8 @@ int main(void){
  for(;;){double age=(os_gettime_ns()-start)/1e9;if(age>25)break;
    if(age>5&&!resume1){assert(f->terminal_paused && f->reconnects==1);st_reconnect_clicked(NULL,NULL,f);resume1=true;}
    if(age>10&&!resume2){assert(f->terminal_paused && f->reconnects==2);st_reconnect_clicked(NULL,NULL,f);resume2=true;}
-   if(age>15&&age<16){assert(f->waiting_audio && f->reconnects==3);}
-   for(int i=0;i<480;i++){right[i]=age<17?0:0.3f*sin(phase);phase+=2*3.141592653589793*440/48000;}
+   if(age>15&&age<16){assert(f->waiting_audio && f->reconnects==3 && f->qcount==0);}
+   for(int i=0;i<480;i++){right[i]=age<17?0:(age<17.2?0.08f:0.3f)*sin(phase);phase+=2*3.141592653589793*440/48000;}
    struct obs_audio_data a={.data={(uint8_t*)left,(uint8_t*)right},.frames=480,.timestamp=os_gettime_ns()};
    st_filter_audio(f,&a);test_pump_ui();os_sleep_ms(10);
  }

@@ -68,3 +68,15 @@ Run the integration fixture with
 compiled `native-stop-harness` (same build flags as the retry harness). It uses
 the actual server control parser and Defender module, not a mock Stop handler.
 Both processes exit after a bounded test and never contact production.
+
+## Reconnect opening-syllable regression
+
+The retry fixture now delays the fourth transport handshake by900ms and sends a
+quiet200ms marker at the start of resumed voice. The server asserts that this
+opening marker arrives, rather than only the louder later audio. The prior
+connected-only capture path fails this check. Same-capture audio is now queued
+for at most3seconds and256chunks while connecting; idle silence, terminal and
+conflict states, and explicit Stop do not accumulate a pre-roll. Expired queue
+entries are discarded and counted, so a long outage does not replay old speech.
+The harness also checks expiry, capacity and all pause gates. This is a local
+synthetic PCM regression, not proof of live-provider transcription accuracy.

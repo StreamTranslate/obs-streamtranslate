@@ -44,11 +44,13 @@ OBS_DECLARE_MODULE()
 #else
 #define ST_PLATFORM "linux"
 #endif
-#define ST_QUEUE_MAX 256 /* ~30s of 120ms chunks — drop oldest beyond this */
+#define ST_QUEUE_MAX 256 /* count cap, also bounded by age below */
+#define ST_QUEUE_MAX_AGE_NS 3000000000ULL /* at most 3s of reconnect pre-roll */
 
 struct st_chunk {
 	struct st_chunk *next;
 	size_t len;
+    uint64_t captured_ns;
 	unsigned char *buf; /* includes LWS_PRE headroom; payload at buf+LWS_PRE */
 };
 
@@ -208,14 +210,16 @@ static void st_queue_push(struct st_filter *f, const unsigned char *data, size_t
 	}
 	memcpy(c->buf + LWS_PRE, data, len);
 	c->len = len;
+    c->captured_ns = os_gettime_ns();
 	c->next = NULL;
 
 	pthread_mutex_lock(&f->qlock);
-    if (f->user_paused) {
+    if (f->user_paused || f->terminal_paused || f->conflict_paused) {
         pthread_mutex_unlock(&f->qlock);
         free(c->buf); free(c); return;
     }
-	if (f->qcount >= ST_QUEUE_MAX && f->qhead) {
+	while (f->qhead && (f->qcount >= ST_QUEUE_MAX ||
+        c->captured_ns - f->qhead->captured_ns > ST_QUEUE_MAX_AGE_NS)) {
 		struct st_chunk *old = f->qhead;
 		f->qhead = old->next;
 		if (!f->qhead)
@@ -237,6 +241,13 @@ static void st_queue_push(struct st_filter *f, const unsigned char *data, size_t
 static struct st_chunk *st_queue_pop(struct st_filter *f)
 {
 	pthread_mutex_lock(&f->qlock);
+    const uint64_t now = os_gettime_ns();
+    while (f->qhead && now - f->qhead->captured_ns > ST_QUEUE_MAX_AGE_NS) {
+        struct st_chunk *old = f->qhead;
+        f->qhead = old->next; f->qcount--; f->queue_drops++;
+        if (!f->qhead) f->qtail = NULL;
+        free(old->buf); free(old);
+    }
 	struct st_chunk *c = f->qhead;
 	if (c) {
 		f->qhead = c->next;
@@ -353,14 +364,14 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1];f->last_close_code=code;
             blog(LOG_INFO,"[streamtranslate] Server close code: %u",code);
             if(st_close_policy(code)==ST_RETRY_MANUAL && code!=4001 && code!=4009){
-                f->terminal_paused=true;
+                pthread_mutex_lock(&f->qlock);f->terminal_paused=true;pthread_mutex_unlock(&f->qlock);
                 st_set_status(f,"%s (code %u)",st_close_message(code),code);
             }
             if(st_close_policy(code)==ST_RETRY_AUDIO){
                 pthread_mutex_lock(&f->qlock);f->waiting_audio=true;f->retry_after_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
                 st_set_status(f,"No audio received. Waiting for the OBS source to send audio before retrying.");
             }
-            if(code==4001 || code==4009){f->conflict_paused=true;st_set_status(f,"Another audio source is active. Reconnect only to switch back to this filter.");}
+            if(code==4001 || code==4009){pthread_mutex_lock(&f->qlock);f->conflict_paused=true;pthread_mutex_unlock(&f->qlock);st_set_status(f,"Another audio source is active. Reconnect only to switch back to this filter.");}
         }
         break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
@@ -719,7 +730,16 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
         if(sqrt(energy/out_frames)>=180){
             pthread_mutex_lock(&f->qlock);f->last_usable_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
         }
-        if(!f->connected) return audio;
+        // Preserve the opening syllables while a same-capture transport wakes
+        // or handshakes. Terminal/conflict/explicit Stop never buffers audio.
+        // Do not fill this bounded queue with idle silence before voice resumes.
+        pthread_mutex_lock(&f->qlock);
+        uint64_t now = os_gettime_ns();
+        bool capture_allowed = !f->user_paused && !f->terminal_paused && !f->conflict_paused;
+        bool fresh_voice = f->last_usable_audio_ns > f->retry_after_audio_ns
+            && now - f->last_usable_audio_ns <= ST_QUEUE_MAX_AGE_NS;
+        pthread_mutex_unlock(&f->qlock);
+        if (!capture_allowed || (!f->connected && !fresh_voice)) return audio;
         st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
 		pthread_mutex_lock(&f->qlock);f->audio_chunks_captured++;pthread_mutex_unlock(&f->qlock);
 		if (f->lws_ctx)
@@ -763,8 +783,8 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
         snprintf(f->capture_id,sizeof(f->capture_id),"%s",capture_uuid);bfree(capture_uuid);
     }
     pthread_mutex_unlock(&f->qlock);
-	f->conflict_paused=false;
-    f->terminal_paused=false;
+	pthread_mutex_lock(&f->qlock);f->conflict_paused=false;
+    f->terminal_paused=false;pthread_mutex_unlock(&f->qlock);
     f->last_close_code=0;
     pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
     pthread_mutex_lock(&f->qlock);
