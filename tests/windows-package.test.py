@@ -41,6 +41,17 @@ class WindowsPackageTests(unittest.TestCase):
             self.assertEqual(archive.read('obs-plugins/64bit/obs-streamtranslate.dll'), self.dll.read_bytes())
             self.assertIsNone(archive.testzip())
 
+    def test_all_static_libuv_link_steps_include_synchronization(self):
+        # Recent libuv uses WaitOnAddress/WakeByAddressSingle. Both the DLL and
+        # native update harness must link the Windows SDK import library.
+        workflow = (ROOT / '.github/workflows/build.yml').read_text()
+        commands = workflow.split('cl /nologo')[1:]
+        uv_commands = [command.split('      - name:')[0] for command in commands
+                       if 'libuv.lib' in command.split('      - name:')[0]]
+        self.assertEqual(len(uv_commands), 2)
+        for command in uv_commands:
+            self.assertIn('Synchronization.lib', command)
+
     def test_missing_input_leaves_no_partial_package(self):
         self.ca.unlink()
         with self.assertRaises(FileNotFoundError): self.package()
