@@ -70,6 +70,7 @@ struct st_filter {
 	int  audio_chunks_captured;
 	int  audio_chunks_sent;
 	char filter_id[48];
+    char capture_id[48]; /* per intentional capture; protected by qlock */
 	uint64_t callbacks, input_frames, last_callback_ns, last_send_ns;
 	uint64_t written_bytes, write_errors, resample_errors, queue_drops, reconnects;
 	double left_peak, right_peak;
@@ -393,9 +394,10 @@ static void st_connect(struct st_filter *f)
 		return;
 	}
 
-	char path[512];
-	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&transportVersion=%s%s",
-         f->plugin_key, f->sample_rate,f->filter_id,ST_PLUGIN_VERSION,
+	char path[640], capture_id[48];
+    pthread_mutex_lock(&f->qlock);snprintf(capture_id,sizeof(capture_id),"%s",f->capture_id);pthread_mutex_unlock(&f->qlock);
+	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&captureId=%s&transportVersion=%s%s",
+         f->plugin_key, f->sample_rate,f->filter_id,capture_id,ST_PLUGIN_VERSION,
          f->sending_stereo ? "&channels=2" : "");
     pthread_mutex_lock(&f->qlock);f->reconnects++;pthread_mutex_unlock(&f->qlock);
 
@@ -639,6 +641,8 @@ static void *st_create(obs_data_t *settings, obs_source_t *context)
 	f->context = context;
     snprintf(f->filter_id,sizeof(f->filter_id),"filter-%" PRIx64,os_gettime_ns());
 	pthread_mutex_init(&f->qlock, NULL);
+    char *capture_uuid=os_generate_uuid();
+    snprintf(f->capture_id,sizeof(f->capture_id),"%s",capture_uuid);bfree(capture_uuid);
 	st_build_resampler(f);
 	st_update(f, settings);
 	f->stop = false;
@@ -753,6 +757,12 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	(void)prop;
 	if (!f)
 		return false;
+    pthread_mutex_lock(&f->qlock);
+    if(f->user_paused || f->conflict_paused || f->terminal_paused){
+        char *capture_uuid=os_generate_uuid();
+        snprintf(f->capture_id,sizeof(f->capture_id),"%s",capture_uuid);bfree(capture_uuid);
+    }
+    pthread_mutex_unlock(&f->qlock);
 	f->conflict_paused=false;
     f->terminal_paused=false;
     f->last_close_code=0;
