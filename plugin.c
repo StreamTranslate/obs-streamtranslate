@@ -567,10 +567,10 @@ static void *st_ws_thread(void *arg)
 	}
 
     lws_sul_cancel(&f->service_pulse);
-	if (f->wsi) {
-		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
-		lws_service(f->lws_ctx, 50);
-	}
+    /* The poll backend ignores lws_service's nominal timeout. Once the pulse
+     * is cancelled, another service call can sleep indefinitely after closing
+     * the last socket. Destroy on this owner thread; it closes active and
+     * unfinished connections while f and its mutex are still alive. */
 	lws_context_destroy(f->lws_ctx);
 	f->lws_ctx = NULL;
 	f->wsi = NULL;

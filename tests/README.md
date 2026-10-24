@@ -80,3 +80,5 @@ conflict states, and explicit Stop do not accumulate a pre-roll. Expired queue
 entries are discarded and counted, so a long outage does not replay old speech.
 The harness also checks expiry, capacity and all pause gates. This is a local
 synthetic PCM regression, not proof of live-provider transcription accuracy.
+
+Reliability release keeps public single-speaker mode. Teardown no longer calls unbounded lws_service after cancellation.
