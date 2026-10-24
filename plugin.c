@@ -37,7 +37,7 @@ OBS_DECLARE_MODULE()
 #include "retry-policy.h"
 #include "ca-path.h"
 #define ST_PLUGIN_VERSION "capture-health-v2"
-#define ST_RELEASE_VERSION "0.1.12"
+#define ST_RELEASE_VERSION "0.1.13"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
 #elif defined(__APPLE__)

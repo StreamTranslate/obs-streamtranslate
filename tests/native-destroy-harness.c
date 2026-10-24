@@ -11,7 +11,7 @@ static struct lws *test_connect(const struct lws_client_connect_info *);
 #endif
 static struct lws *test_connect(const struct lws_client_connect_info *source)
 {
-    assert(!strcmp(source->address, ST_DEFAULT_SERVER));
+    assert(!strcmp(source->address, "streamtranslate.live"));
     assert(source->port == 443 && source->ssl_connection == LCCSCF_USE_SSL);
     struct lws_client_connect_info ci = *source;
     ci.port = ST_LOCAL_TEST_PORT;
