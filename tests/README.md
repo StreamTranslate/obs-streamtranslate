@@ -82,3 +82,18 @@ The harness also checks expiry, capacity and all pause gates. This is a local
 synthetic PCM regression, not proof of live-provider transcription accuracy.
 
 Reliability release keeps public single-speaker mode. Teardown no longer calls unbounded lws_service after cancellation.
+
+## Pause / Start and independent connection test
+
+`native-controls-harness.c` uses real libobs properties plus a loopback-only
+HTTP health fixture (`python3 tests/connection-server.py`, port8798). Build with
+`ST_CONNECTION_TEST_MODE` supplied by the harness only. It checks morphing
+Pause/Start labels and intent, one-second counter snapshots, probes while active
+and paused without changing capture identity/audio state, malformed health JSON,
+redirect/error/oversize rejection, host validation, and bounded cancellation.
+The fixture rejects credentials. A successful health probe is **not** proof of
+plugin-key authentication or end-to-end captions. Production builds require
+HTTPS, never follow redirects, and have no test URL override.
+
+The update-server fixture's new/equal/older tags are0.1.14/0.1.13/0.1.12 to match
+current release0.1.13; these are test metadata, not a published version bump.

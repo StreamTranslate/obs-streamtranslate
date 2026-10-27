@@ -2,3 +2,7 @@
 /genhdr/
 /obs-headers/
 /local-test/
+
+# Local native regression artifacts
+/build-local/
+/test-headers/

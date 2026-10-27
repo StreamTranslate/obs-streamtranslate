@@ -15,7 +15,8 @@ int main(void) {
  assert(!obs_properties_get(props,"stereo_split"));
  assert(obs_properties_get(props,"plugin_key"));
  assert(obs_properties_get(props,"stop_stream"));
- assert(obs_properties_get(props,"reconnect"));
+ assert(obs_properties_get(props,"test_connection"));
+ assert(!obs_properties_get(props,"reconnect"));
  st_build_resampler(&f);
  assert(f.resampler && !f.sending_stereo);
  float left[480]={0},right[480];

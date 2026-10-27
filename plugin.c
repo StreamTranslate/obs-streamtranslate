@@ -69,6 +69,11 @@ struct st_filter {
 	char status[320];
 	unsigned last_close_code;
 	bool show_diagnostics;
+    /* Independent HTTPS health probe: never replaces the audio connection. */
+    pthread_t test_thread;
+    pthread_cond_t test_ready;
+    bool test_started, test_stop, test_pending, test_busy;
+    char test_server[256], test_result[320];
 	bool muted_now;
 	int  audio_chunks_captured;
 	int  audio_chunks_sent;
@@ -121,19 +126,20 @@ static void st_refresh_status_ui(void *data)
     obs_source_release(source);
 }
 
-static void st_set_status(struct st_filter *f, const char *fmt, ...)
+static void st_publish_status(struct st_filter *f, bool log_transition, const char *fmt, va_list ap)
 {
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(f->status, sizeof(f->status), fmt, ap);
-	va_end(ap);
-	blog(LOG_INFO, "[streamtranslate] %s", f->status);
+    char line[sizeof(f->status)];
+    vsnprintf(line, sizeof(line), fmt, ap);
+    pthread_mutex_lock(&f->qlock);
+    snprintf(f->status, sizeof(f->status), "%s", line);
+    pthread_mutex_unlock(&f->qlock);
+    if (log_transition) blog(LOG_INFO, "[streamtranslate] %s", line);
 	/* OBS builds the properties panel once; without this the Status line
 	 * shows whatever it said when the dialog opened. */
 	if (f->context) {
 		obs_data_t *sd = obs_source_get_settings(f->context);
 		if (sd) {
-			obs_data_set_string(sd, "status_text", f->status);
+			obs_data_set_string(sd, "status_text", line);
 			obs_data_release(sd);
 		}
         /* Button callbacks return true to refresh themselves. Network/audio
@@ -143,6 +149,34 @@ static void st_set_status(struct st_filter *f, const char *fmt, ...)
             if (source) obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, source, false);
         }
 	}
+}
+
+static void st_set_status(struct st_filter *f, const char *fmt, ...)
+{
+    va_list ap; va_start(ap, fmt);
+    st_publish_status(f, true, fmt, ap);
+    va_end(ap);
+}
+
+static void st_counter_status(struct st_filter *f, const char *fmt, ...)
+{
+    va_list ap; va_start(ap, fmt);
+    st_publish_status(f, false, fmt, ap);
+    va_end(ap);
+}
+
+/* Run on the WS thread, not in the real-time audio callback. */
+static void st_refresh_live_status(struct st_filter *f, uint64_t now, uint64_t *last)
+{
+    if (*last && now - *last < 1000000000ULL) return;
+    pthread_mutex_lock(&f->qlock);
+    bool active = f->connected && !f->user_paused && !f->muted_now;
+    int captured = f->audio_chunks_captured, sent = f->audio_chunks_sent;
+    char server[sizeof(f->server)]; snprintf(server, sizeof(server), "%s", f->server);
+    pthread_mutex_unlock(&f->qlock);
+    if (!active) return;
+    *last = now;
+    st_counter_status(f, "Connected to %s - captured %d, sent %d audio chunks", server, captured, sent);
 }
 
 /* Numeric metadata only; this bounded ring survives network interruptions.
@@ -372,7 +406,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
                 pthread_mutex_lock(&f->qlock);f->waiting_audio=true;f->retry_after_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
                 st_set_status(f,"No audio received. Waiting for the OBS source to send audio before retrying.");
             }
-            if(code==4001 || code==4009){pthread_mutex_lock(&f->qlock);f->conflict_paused=true;pthread_mutex_unlock(&f->qlock);st_set_status(f,"Another audio source is active. Reconnect only to switch back to this filter.");}
+            if(code==4001 || code==4009){pthread_mutex_lock(&f->qlock);f->conflict_paused=true;pthread_mutex_unlock(&f->qlock);st_set_status(f,"Another audio source is active. Press Start sending audio only to switch back to this filter.");}
         }
         break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
@@ -380,7 +414,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         f->stop_phase = 0; f->stop_deadline_ns = 0;
         pthread_mutex_unlock(&f->qlock);
         st_queue_clear(f);
-		if (st_user_paused(f)) st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
+		if (st_user_paused(f)) st_set_status(f, "Paused - not sending audio. Press Start sending audio to resume.");
         else if(!f->conflict_paused && !f->terminal_paused && !f->waiting_audio) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
@@ -498,6 +532,7 @@ static const char *st_ca_bundle_path(void)
 }
 
 #include "update-check.h"
+#include "connection-test.h"
 
 static void st_service_pulse(lws_sorted_usec_list_t *sul)
 {
@@ -557,13 +592,7 @@ static void *st_ws_thread(void *arg)
         }
 		lws_service(f->lws_ctx, 20);
 
-		/* refresh the status line with live counters once a second */
-		uint64_t now2 = os_gettime_ns();
-		if (f->connected && !st_user_paused(f) && !f->muted_now && now2 - last_status > 15000000000ULL) {
-			last_status = now2;
-			st_set_status(f, "Connected to %s - captured %d, sent %d audio chunks",
-				      f->server, f->audio_chunks_captured, f->audio_chunks_sent);
-		}
+        st_refresh_live_status(f, os_gettime_ns(), &last_status);
 	}
 
     lws_sul_cancel(&f->service_pulse);
@@ -660,6 +689,7 @@ static void *st_create(obs_data_t *settings, obs_source_t *context)
 	f->context = context;
     snprintf(f->filter_id,sizeof(f->filter_id),"filter-%" PRIx64,os_gettime_ns());
 	pthread_mutex_init(&f->qlock, NULL);
+    pthread_cond_init(&f->test_ready, NULL);
     char *capture_uuid=os_generate_uuid();
     snprintf(f->capture_id,sizeof(f->capture_id),"%s",capture_uuid);bfree(capture_uuid);
 	st_build_resampler(f);
@@ -675,8 +705,10 @@ static void st_destroy(void *data)
 	f->stop = true;
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
+	st_connection_test_stop(f);
 	pthread_join(f->thread, NULL);
 	st_queue_clear(f);
+	pthread_cond_destroy(&f->test_ready);
 	pthread_mutex_destroy(&f->qlock);
 	if (f->resampler)
 		audio_resampler_destroy(f->resampler);
@@ -772,7 +804,7 @@ static bool st_stop_clicked(obs_properties_t *props, obs_property_t *prop, void 
     }
     pthread_mutex_unlock(&f->qlock);
     st_queue_clear(f);
-    st_set_status(f, "Paused - not sending audio. Press Reconnect to resume.");
+    st_set_status(f, "Paused - not sending audio. Press Start sending audio to resume.");
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
 	return true;
@@ -807,6 +839,16 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	return true;
 }
 
+static bool st_audio_toggle_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
+{
+    struct st_filter *f = data;
+    if (!f) return false;
+    pthread_mutex_lock(&f->qlock);
+    bool paused = f->user_paused || f->terminal_paused || f->conflict_paused;
+    pthread_mutex_unlock(&f->qlock);
+    return paused ? st_reconnect_clicked(props, prop, data) : st_stop_clicked(props, prop, data);
+}
+
 static bool st_diagnostics_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
 {
     (void)props; (void)prop;
@@ -826,7 +868,8 @@ static void st_diagnostic_text(struct st_filter *f, char *out, size_t size)
       "Last server close code: %u\n\n"
       "If account access is blocked, copy the current plugin key from Control and check your plan.\n"
       "If no audio is delivered, check that the source and filter are enabled and the source is not muted.\n"
-      "Reconnect switches this filter back on. Stop pauses this filter only.\n"
+      "Start sending audio resumes this filter. Pause sending audio pauses this filter only.\n"
+      "Test connection checks server reachability only; it never starts or interrupts audio.\n"
       "For support, use Help > Log Files > View Current Log in OBS. Do not share your plugin key.",
       ST_RELEASE_VERSION,obs_get_version_string(),f->connected?"Connected":f->terminal_paused?"Blocked by server":f->user_paused?"Paused":f->waiting_audio?"Waiting for audio":f->conflict_paused?"Another source active":"Connecting / disconnected",
       f->audio_chunks_captured,f->audio_chunks_sent,
@@ -852,8 +895,9 @@ static obs_properties_t *st_get_properties(void *data)
 	obs_property_t *st = obs_properties_add_text(props, "status_text", "Status", OBS_TEXT_INFO);
 	if (f) {
 		char line[420];
-		snprintf(line, sizeof(line), "%s%s", f->status[0] ? f->status : "Starting up ...",
-			 f->connected ? "" : "");
+		pthread_mutex_lock(&f->qlock);
+        snprintf(line, sizeof(line), "%s", f->status[0] ? f->status : "Starting up ...");
+        pthread_mutex_unlock(&f->qlock);
 		(void)st; /* No fake question-mark button: diagnostics has a real control. */
 		obs_data_t *s = obs_source_get_settings(f->context);
 		if (s) {
@@ -874,10 +918,28 @@ static obs_properties_t *st_get_properties(void *data)
         obs_data_release(settings);
     }
 
-	obs_properties_add_button2(props, "stop_stream", "Stop (pause sending audio)",
-				   st_stop_clicked, f);
-	obs_properties_add_button2(props, "reconnect", "Reconnect / Test connection",
-				   st_reconnect_clicked, f);
+    bool paused = false;
+    char test_result[320] = "Not tested. Checks server reachability without changing audio.";
+    bool testing = false;
+    if (f) {
+        pthread_mutex_lock(&f->qlock);
+        paused = f->user_paused || f->terminal_paused || f->conflict_paused;
+        testing = f->test_busy;
+        if (f->test_result[0]) snprintf(test_result, sizeof(test_result), "%s", f->test_result);
+        pthread_mutex_unlock(&f->qlock);
+    }
+    obs_properties_add_button2(props, "stop_stream",
+        paused ? "Start sending audio" : "Pause sending audio", st_audio_toggle_clicked, f);
+    obs_property_t *test = obs_properties_add_button2(props, "test_connection", "Test connection",
+        st_test_connection_clicked, f);
+    obs_property_set_enabled(test, f && !testing);
+    obs_property_set_long_description(test, "Read-only HTTPS health check. Does not resume audio, reconnect the audio socket, or validate your plugin key.");
+    obs_properties_add_text(props, "connection_test_text", "Connection test", OBS_TEXT_INFO);
+    if (f) {
+        obs_data_t *settings = obs_source_get_settings(f->context);
+        obs_data_set_string(settings, "connection_test_text", test_result);
+        obs_data_release(settings);
+    }
 	return props;
 }
 

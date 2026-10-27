@@ -14,13 +14,13 @@ static inline enum st_retry_policy st_close_policy(unsigned code)
 static inline const char *st_close_message(unsigned code)
 {
     switch (code) {
-    case 4003: return "Account access blocked (trial/activation). Check your plan and current key on Control, then Reconnect.";
+    case 4003: return "Account access blocked (trial/activation). Check your plan and current key on Control, then press Start sending audio.";
     case 4004: case 4402: return "Plan hours exhausted. Check your plan on Control before reconnecting.";
     case 4005: return "This capture mode requires a different plan. Check Control.";
-    case 4008: return "Stopped after idle timeout. Press Reconnect to start again.";
-    case 4403: return "Plugin key rejected. Copy your current key from Control, then Reconnect.";
+    case 4008: return "Stopped after idle timeout. Press Start sending audio to start again.";
+    case 4403: return "Plugin key rejected. Copy your current key from Control, then press Start sending audio.";
     case 4400: return "Server configuration rejected. Check the Server field and contact support.";
-    default: return "Session stopped by server. Check Control, then Reconnect.";
+    default: return "Session stopped by server. Check Control, then press Start sending audio.";
     }
 }
 static inline int st_audio_can_retry(uint64_t audio, uint64_t stopped, uint64_t now)

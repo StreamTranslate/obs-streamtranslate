@@ -1,7 +1,9 @@
 #include <libwebsockets.h>
 static struct lws *test_connect(const struct lws_client_connect_info *);
 #define lws_client_connect_via_info test_connect
+#define ST_CONNECTION_TEST_MODE
 #include "../plugin.c"
+const char *st_connection_test_url="http://127.0.0.1:8798/ok";
 #undef lws_client_connect_via_info
 static struct lws *test_connect(const struct lws_client_connect_info *source){struct lws_client_connect_info ci=*source;ci.port=8796;ci.ssl_connection=0;ci.address="127.0.0.1";ci.host="127.0.0.1";return lws_client_connect_via_info(&ci);}
 static const char *name(void *x){(void)x;return "Synthetic HDMI audio";}
@@ -24,15 +26,17 @@ int main(void){
  obs_source_t *source=obs_source_create_private("qa_audio","QA stop",NULL);obs_set_output_source(0,source);
  obs_data_t *settings=obs_data_create();obs_data_set_string(settings,"server","127.0.0.1");obs_data_set_string(settings,"plugin_key","local-test-only");
  struct st_filter *f=st_create(settings,source);
- float left[480]={0},right[480];double phase=0;uint64_t start=os_gettime_ns();bool stopped1=false,resumed=false,stopped2=false;int sent_at_stop=0;
+ float left[480]={0},right[480];double phase=0;uint64_t start=os_gettime_ns();bool stopped1=false,resumed=false,stopped2=false,probed_active=false,probed_paused=false;int sent_at_stop=0;
  for(;;){double age=(os_gettime_ns()-start)/1e9;if(age>12)break;
-   if(age>3&&!stopped1){assert(f->connected && f->audio_chunks_sent>30);st_stop_clicked(NULL,NULL,f);sent_at_stop=f->audio_chunks_sent;stopped1=true;}
-   if(age>5&&!resumed){assert(!f->connected && st_user_paused(f) && f->reconnects==1 && f->audio_chunks_sent==sent_at_stop);st_reconnect_clicked(NULL,NULL,f);resumed=true;}
+   if(age>2&&!probed_active){assert(f->connected);st_test_connection_clicked(NULL,NULL,f);probed_active=true;}
+   if(age>3&&!stopped1){assert(f->connected && f->audio_chunks_sent>30);st_audio_toggle_clicked(NULL,NULL,f);sent_at_stop=f->audio_chunks_sent;stopped1=true;}
+   if(age>4&&!probed_paused){assert(st_user_paused(f));st_test_connection_clicked(NULL,NULL,f);probed_paused=true;}
+   if(age>5&&!resumed){assert(!f->connected && st_user_paused(f) && f->reconnects==1 && f->audio_chunks_sent==sent_at_stop);assert(strstr(f->test_result,"Server reachable"));st_audio_toggle_clicked(NULL,NULL,f);resumed=true;}
    if(age>9&&!stopped2){assert(f->connected && f->reconnects==2 && f->audio_chunks_sent>sent_at_stop+30);st_stop_clicked(NULL,NULL,f);st_stop_clicked(NULL,NULL,f);sent_at_stop=f->audio_chunks_sent;stopped2=true;}
    for(int i=0;i<480;i++){right[i]=0.3f*sin(phase);phase+=2*3.141592653589793*440/48000;}
    struct obs_audio_data a={.data={(uint8_t*)left,(uint8_t*)right},.frames=480,.timestamp=os_gettime_ns()};
    st_filter_audio(f,&a);test_pump_ui();os_sleep_ms(10);
  }
  assert(stopped2 && !f->connected && st_user_paused(f) && f->reconnects==2 && f->audio_chunks_sent==sent_at_stop && f->qcount==0);
- st_destroy(f);test_pump_ui();obs_set_output_source(0,NULL);obs_source_release(source);obs_data_release(settings);obs_shutdown();puts("PASS native Stop sends intent, stops PCM immediately, stays paused, resumes only on Reconnect, and repeated Stop is idempotent");return 0;
+ st_destroy(f);test_pump_ui();obs_set_output_source(0,NULL);obs_source_release(source);obs_data_release(settings);obs_shutdown();puts("PASS native Stop sends intent, stops PCM immediately, stays paused, resumes only on Start, connection probes leave active/paused audio unchanged, and repeated Stop is idempotent");return 0;
 }

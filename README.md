@@ -114,14 +114,19 @@ Everything after that you do yourself from your OBS remote.
 3. Add your overlay URL as a **Browser Source** to display the captions
 
 The filter shows a live status line — it counts audio as you speak when
-connected, and names the problem when it isn't.
+connected (refreshed once per second), and names the problem when it isn't.
 
 ## Using it
 
 - **Change languages:** from your control page, in any browser including your
   phone. Applies live, never asks for microphone access.
-- **Pause:** mute the audio source in OBS, or disable the filter (the eye icon).
-  Captions stop immediately.
+- **Pause / resume sending audio:** the filter's **Pause sending audio** button
+  changes to **Start sending audio** while paused. Starting is an explicit action;
+  automatic network recovery still works while audio is enabled. Muting the OBS
+  source or disabling the filter also stops its audio.
+- **Test connection:** separate, read-only HTTPS health check against the configured
+  Server. It neither starts nor interrupts audio and does not authenticate your
+  plugin key. Its result is separate from the live audio status.
 - **Stop:** the control page shows a *Stop stream* button while the plugin is
   connected.
 

@@ -40,13 +40,15 @@ static const char *st_update_allowed_protocol(void)
     return "https";
 }
 
-static bool st_update_capture(char *body, size_t capacity, size_t *used)
+static bool st_https_capture(const char *request_url, const char *allowed_protocol,
+                             const char *user_agent, bool (*stopping)(void *), void *opaque,
+                             char *body, size_t capacity, size_t *used)
 {
     *used = 0;
     uint64_t start = os_gettime_ns();
     bool ok = false;
 #ifdef _WIN32
-    wchar_t executable[MAX_PATH], command[2048], url[1024], protocol[16];
+    wchar_t executable[MAX_PATH], command[2048], url[1024], protocol[16], agent[128];
     UINT executable_length = GetSystemDirectoryW(executable, MAX_PATH);
     if (!executable_length || executable_length + 10 >= MAX_PATH) return false;
     wcscat(executable, L"\\curl.exe");
@@ -55,12 +57,13 @@ static bool st_update_capture(char *body, size_t capacity, size_t *used)
     if (st_update_test_executable &&
         !MultiByteToWideChar(CP_UTF8, 0, st_update_test_executable, -1, executable, MAX_PATH)) return false;
 #endif
-    if (!MultiByteToWideChar(CP_UTF8, 0, st_update_api_url(), -1, url, 1024) ||
-        !MultiByteToWideChar(CP_UTF8, 0, st_update_allowed_protocol(), -1, protocol, 16)) return false;
+    if (!MultiByteToWideChar(CP_UTF8, 0, request_url, -1, url, 1024) ||
+        !MultiByteToWideChar(CP_UTF8, 0, allowed_protocol, -1, protocol, 16) ||
+        !MultiByteToWideChar(CP_UTF8, 0, user_agent, -1, agent, 128)) return false;
     _snwprintf(command, 2048,
         L"\"%ls\" --disable --silent --fail --proto =%ls --connect-timeout 3 --max-time 6 "
-        L"--max-filesize 131072 --user-agent StreamTranslate-OBS-update-check "
-        L"--write-out \"\\n%%{http_code}\" --url \"%ls\"", executable, protocol, url);
+        L"--max-filesize 131072 --user-agent %ls "
+        L"--write-out \"\\n%%{http_code}\" --url \"%ls\"", executable, protocol, agent, url);
     SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, TRUE};
     HANDLE read_pipe = NULL, write_pipe = NULL;
     if (!CreatePipe(&read_pipe, &write_pipe, &attributes, 0)) return false;
@@ -90,7 +93,7 @@ static bool st_update_capture(char *body, size_t capacity, size_t *used)
     CloseHandle(write_pipe);
     if (!created) { CloseHandle(read_pipe); return false; }
     bool exited = false, overflow = false;
-    while (!st_updates_stopping() && os_gettime_ns() - start < ST_UPDATE_TIMEOUT_NS) {
+    while (!stopping(opaque) && os_gettime_ns() - start < ST_UPDATE_TIMEOUT_NS) {
         DWORD available = 0, count = 0;
         if (PeekNamedPipe(read_pipe, NULL, 0, NULL, &available, NULL) && available) {
             if (*used == capacity) { overflow = true; break; }
@@ -122,10 +125,10 @@ static bool st_update_capture(char *body, size_t capacity, size_t *used)
     if (st_update_test_executable) executable = st_update_test_executable;
 #endif
     char *const args[] = {(char *)executable, "--disable", "--silent", "--fail",
-        "--proto", (char *)(strcmp(st_update_allowed_protocol(), "http") == 0 ? "=http" : "=https"),
+        "--proto", (char *)(strcmp(allowed_protocol, "http") == 0 ? "=http" : "=https"),
         "--connect-timeout", "3", "--max-time", "6", "--max-filesize", "131072",
-        "--user-agent", "StreamTranslate-OBS-update-check", "--write-out", "\n%{http_code}",
-        "--url", (char *)st_update_api_url(), NULL};
+        "--user-agent", (char *)user_agent, "--write-out", "\n%{http_code}",
+        "--url", (char *)request_url, NULL};
     int pipes[2];
     if (pipe(pipes) != 0) return false;
     int flags = fcntl(pipes[0], F_GETFL);
@@ -162,7 +165,7 @@ static bool st_update_capture(char *body, size_t capacity, size_t *used)
     if (error) { close(pipes[0]); return false; }
     int status = 0;
     bool exited = false, eof = false, overflow = false;
-    while (!st_updates_stopping() && os_gettime_ns() - start < ST_UPDATE_TIMEOUT_NS) {
+    while (!stopping(opaque) && os_gettime_ns() - start < ST_UPDATE_TIMEOUT_NS) {
         char buffer[4096];
         ssize_t count = read(pipes[0], buffer, sizeof(buffer));
         if (count > 0) {
@@ -183,5 +186,17 @@ static bool st_update_capture(char *body, size_t capacity, size_t *used)
 #endif
     body[*used] = 0;
     return ok;
+}
+static bool st_update_capture_stopping(void *unused)
+{
+    (void)unused;
+    return st_updates_stopping();
+}
+
+static bool st_update_capture(char *body, size_t capacity, size_t *used)
+{
+    return st_https_capture(st_update_api_url(), st_update_allowed_protocol(),
+        "StreamTranslate-OBS-update-check", st_update_capture_stopping, NULL,
+        body, capacity, used);
 }
 #endif
