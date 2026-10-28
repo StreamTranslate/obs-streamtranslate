@@ -13,9 +13,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         assert self.headers.get('User-Agent') == 'StreamTranslate-OBS-update-check'
         path = self.path
         status = 200
-        data = {'draft': False, 'prerelease': False, 'tag_name': 'v0.1.14'}
-        if path == '/equal': data['tag_name'] = 'v0.1.13'
-        if path == '/older': data['tag_name'] = 'v0.1.12'
+        data = {'draft': False, 'prerelease': False, 'tag_name': 'v0.1.15'}
+        if path == '/equal': data['tag_name'] = 'v0.1.14'
+        if path == '/older': data['tag_name'] = 'v0.1.13'
         if path == '/draft': data['draft'] = True
         if path == '/prerelease': data['prerelease'] = True
         if path == '/missing': del data['draft']
