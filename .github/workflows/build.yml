@@ -30,6 +30,7 @@ jobs:
           name: obs-streamtranslate-linux
           path: |
             build/obs-streamtranslate.so
+            LICENSE-libcaption.txt
             third-party/libwebsockets-LICENSE.txt
 
   build-macos:
@@ -65,7 +66,7 @@ jobs:
           #define OBS_BETA 0
           HDR
           clang -bundle -O2 -mmacosx-version-min=14.0 -o dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate \
-            plugin.c \
+            plugin.c clipboard-macos.m -framework AppKit \
             -I obs-studio/libobs \
             -I genhdr \
             -I $(brew --prefix)/include \
@@ -80,14 +81,15 @@ jobs:
             <key>CFBundleIdentifier</key><string>live.streamtranslate.obs-plugin</string>
             <key>CFBundleExecutable</key><string>obs-streamtranslate</string>
             <key>CFBundlePackageType</key><string>BNDL</string>
-            <key>CFBundleVersion</key><string>0.1.14</string>
+            <key>CFBundleVersion</key><string>0.1.15</string>
           </dict>
           </plist>
           PLIST
       - name: Bundle CA certificates
         run: |
           mkdir -p dist/obs-streamtranslate.plugin/Contents/Resources
-          curl -sSL -o dist/obs-streamtranslate.plugin/Contents/Resources/cacert.pem https://curl.se/ca/cacert.pem
+          curl -fsSL -o dist/obs-streamtranslate.plugin/Contents/Resources/cacert.pem https://curl.se/ca/cacert.pem
+          cp LICENSE-libcaption.txt third-party/libwebsockets-LICENSE.txt dist/obs-streamtranslate.plugin/Contents/Resources/
       - name: Link pinned macOS 14-compatible libraries
         run: |
           BIN=dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate
@@ -125,7 +127,7 @@ jobs:
           chmod +x pkg-scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
-            --version 0.1.14 \
+            --version 0.1.15 \
             --scripts pkg-scripts \
             --install-location "/" \
             component.pkg

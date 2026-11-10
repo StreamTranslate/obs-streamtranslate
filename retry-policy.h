@@ -5,7 +5,7 @@ enum st_retry_policy { ST_RETRY_NETWORK, ST_RETRY_MANUAL, ST_RETRY_AUDIO };
 static inline enum st_retry_policy st_close_policy(unsigned code)
 {
     switch(code) {
-    case 4001: case 4003: case 4004: case 4005: case 4008: case 4009: case 4400: case 4402: case 4403:
+    case 4001: case 4003: case 4004: case 4005: case 4008: case 4009: case 4400: case 4402: case 4403: case 4409:
         return ST_RETRY_MANUAL;
     case 4010: return ST_RETRY_AUDIO;
     default: return ST_RETRY_NETWORK;

@@ -47,4 +47,11 @@ target_compile_definitions(obs-streamtranslate PRIVATE _GNU_SOURCE)
 if(ST_STATIC_LIBWEBSOCKETS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(obs-streamtranslate PRIVATE "LINKER:--exclude-libs,ALL")
 endif()
+
+if(APPLE)
+  enable_language(OBJC)
+  target_sources(obs-streamtranslate PRIVATE clipboard-macos.m)
+  target_link_libraries(obs-streamtranslate "-framework AppKit")
+endif()
+
 set_target_properties(obs-streamtranslate PROPERTIES PREFIX "")

@@ -30,6 +30,7 @@ Build on macOS with official OBS headers matching the installed OBS app, generat
 
 ```sh
 clang -O1 -Wall -Werror -o dist/native-audio-test tests/native-audio-harness.c \
+  clipboard-macos.m -framework AppKit \
   -I obs-headers/libobs -I genhdr -I /opt/homebrew/include \
   $(pkg-config --cflags --libs libwebsockets) \
   -F /Applications/OBS.app/Contents/Frameworks -framework libobs \

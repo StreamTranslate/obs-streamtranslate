@@ -25,6 +25,7 @@
 #include <stdarg.h>
 #include <inttypes.h>
 #include <math.h>
+#include <stdatomic.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -36,8 +37,9 @@ OBS_DECLARE_MODULE()
 
 #include "retry-policy.h"
 #include "ca-path.h"
-#define ST_PLUGIN_VERSION "capture-health-v2"
-#define ST_RELEASE_VERSION "0.1.14"
+#define ST_PLUGIN_VERSION "two-speaker-native-cc-v1"
+#define ST_RELEASE_VERSION "0.1.15"
+#include "native-cc.h"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
 #elif defined(__APPLE__)
@@ -64,6 +66,17 @@ struct st_filter {
 	/* Two-speaker (stereo split): keep L/R separate instead of folding to mono, so
 	   a Rode/DJI receiver in SPLIT mode gives one caption track per transmitter. */
 	bool stereo_split;
+	/* Which speaker this filter carries when it sits on a single-mic source:
+	   0 = Mic 1 (default), 1 = Mic 2. Sent as &speaker=1 so the server runs a
+	   second caption track for the same room. */
+	int speaker;
+	atomic_bool native_twitch_cc;
+	atomic_bool two_speakers;
+	struct st_cc_state cc_state;
+	struct st_cc_fragments cc_fragments;
+	char cc_acks[8][256];
+	unsigned cc_ack_read, cc_ack_count;
+	bool cc_ack_last;
 
 	/* live status shown in the filter UI */
 	char status[320];
@@ -74,6 +87,7 @@ struct st_filter {
     pthread_cond_t test_ready;
     bool test_started, test_stop, test_pending, test_busy;
     char test_server[256], test_result[320];
+    bool status_dirty;
 	bool muted_now;
 	int  audio_chunks_captured;
 	int  audio_chunks_sent;
@@ -82,11 +96,11 @@ struct st_filter {
 	uint64_t callbacks, input_frames, last_callback_ns, last_send_ns;
 	uint64_t written_bytes, write_errors, resample_errors, queue_drops, reconnects;
 	double left_peak, right_peak;
-	uint64_t diagnostic_sequence, last_health_ns;
+	uint64_t diagnostic_sequence, last_health_ns, last_source_metadata_ns;
 	char health_ring[16][2048];
 	unsigned health_read, health_count;
 	bool conflict_paused;
-	bool terminal_paused, waiting_audio;
+	bool terminal_paused, waiting_audio, waiting_primary;
 	uint64_t retry_after_audio_ns, last_usable_audio_ns;
 	bool user_paused; /* protected by qlock; not saved to settings */
     unsigned stop_phase; /* 0=none, 1=send intent, 2=graceful close; qlock */
@@ -104,8 +118,9 @@ struct st_filter {
 
 	/* websocket service thread */
 	pthread_t thread;
-	volatile bool stop;
+	atomic_bool stop;
 	volatile bool connected;
+    atomic_bool audio_started;
 	struct lws_context *lws_ctx;
 	struct lws *wsi;
     lws_sorted_usec_list_t service_pulse;
@@ -116,67 +131,59 @@ struct st_filter {
 	int qcount;
 };
 
-/* Refresh only on OBS's UI task queue. A source reference keeps queued work
- * safe if the filter dialog closes; never rebuild properties in a WS callback
- * or while a properties button is handling its mouse release. */
+#include "native-cc-output.h"
+
+/* UI work must run after the current Qt event, never on the audio/WS thread.
+ * A weak source reference also makes queued work safe after filter removal. */
+struct st_status_refresh {
+    obs_weak_source_t *source;
+    char text[320];
+};
 static void st_refresh_status_ui(void *data)
 {
-    obs_source_t *source = data;
-    obs_source_update_properties(source);
-    obs_source_release(source);
+    struct st_status_refresh *refresh = data;
+    obs_source_t *source = obs_weak_source_get_source(refresh->source);
+    if (source) {
+        obs_data_t *settings = obs_source_get_settings(source);
+        obs_data_set_string(settings, "status_text", refresh->text);
+        obs_data_release(settings);
+        obs_source_update_properties(source);
+        obs_source_release(source);
+    }
+    obs_weak_source_release(refresh->source);
+    bfree(refresh);
 }
-
-static void st_publish_status(struct st_filter *f, bool log_transition, const char *fmt, va_list ap)
-{
-    char line[sizeof(f->status)];
-    vsnprintf(line, sizeof(line), fmt, ap);
-    pthread_mutex_lock(&f->qlock);
-    snprintf(f->status, sizeof(f->status), "%s", line);
-    pthread_mutex_unlock(&f->qlock);
-    if (log_transition) blog(LOG_INFO, "[streamtranslate] %s", line);
-	/* OBS builds the properties panel once; without this the Status line
-	 * shows whatever it said when the dialog opened. */
-	if (f->context) {
-		obs_data_t *sd = obs_source_get_settings(f->context);
-		if (sd) {
-			obs_data_set_string(sd, "status_text", line);
-			obs_data_release(sd);
-		}
-        /* Button callbacks return true to refresh themselves. Network/audio
-         * status changes must explicitly schedule a UI refresh. */
-        if (!obs_in_task_thread(OBS_TASK_UI)) {
-            obs_source_t *source = obs_source_get_ref(f->context);
-            if (source) obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, source, false);
-        }
-	}
-}
-
 static void st_set_status(struct st_filter *f, const char *fmt, ...)
 {
-    va_list ap; va_start(ap, fmt);
-    st_publish_status(f, true, fmt, ap);
+    char text[sizeof(f->status)];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
-}
-
-static void st_counter_status(struct st_filter *f, const char *fmt, ...)
-{
-    va_list ap; va_start(ap, fmt);
-    st_publish_status(f, false, fmt, ap);
-    va_end(ap);
-}
-
-/* Run on the WS thread, not in the real-time audio callback. */
-static void st_refresh_live_status(struct st_filter *f, uint64_t now, uint64_t *last)
-{
-    if (*last && now - *last < 1000000000ULL) return;
     pthread_mutex_lock(&f->qlock);
-    bool active = f->connected && !f->user_paused && !f->muted_now;
-    int captured = f->audio_chunks_captured, sent = f->audio_chunks_sent;
-    char server[sizeof(f->server)]; snprintf(server, sizeof(server), "%s", f->server);
+    bool changed = strcmp(f->status, text) != 0;
+    snprintf(f->status, sizeof(f->status), "%s", text);
     pthread_mutex_unlock(&f->qlock);
-    if (!active) return;
-    *last = now;
-    st_counter_status(f, "Connected to %s - captured %d, sent %d audio chunks", server, captured, sent);
+    if (!changed) return;
+    blog(LOG_INFO, "[streamtranslate] %s", text);
+    pthread_mutex_lock(&f->qlock);
+    f->status_dirty = true;
+    pthread_mutex_unlock(&f->qlock);
+}
+
+/* Called ONLY by the network worker. OBS uses Qt::AutoConnection for UI tasks:
+ * queueing from a button handler would execute inline and destroy that button's
+ * WidgetInfo while OBS is still inside ButtonClicked. */
+static void st_publish_status(struct st_filter *f)
+{
+    pthread_mutex_lock(&f->qlock);
+    if (!f->status_dirty || !f->context) { pthread_mutex_unlock(&f->qlock); return; }
+    f->status_dirty = false;
+    struct st_status_refresh *refresh = bzalloc(sizeof(*refresh));
+    snprintf(refresh->text, sizeof(refresh->text), "%s", f->status);
+    pthread_mutex_unlock(&f->qlock);
+    refresh->source = obs_source_get_weak_source(f->context);
+    obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, refresh, false);
 }
 
 /* Numeric metadata only; this bounded ring survives network interruptions.
@@ -296,6 +303,15 @@ static struct st_chunk *st_queue_pop(struct st_filter *f)
 
 /* ---------------- websocket ---------------- */
 
+static const char *st_setup_close_message(const char *reason)
+{
+    if (!strncmp(reason,"Receiver already supplies",25)) return "Mic 1 uses a stereo receiver. Use that one filter, or switch Mic 1 to Two separate OBS sources first.";
+    if (strstr(reason,"native CC")) return "Two speakers requires native Twitch CC off. Check streamtranslate.live, then press Reconnect.";
+    if (strstr(reason,"settings") || strstr(reason,"admission changed")) return "Settings changed while connecting. Finish setup at streamtranslate.live, then press Reconnect.";
+    if (!strcmp(reason,"Streamer is not live")) return "Waiting for Mic 1. Start its filter with the same Plugin Key; Mic 2 reconnects automatically.";
+    return "Audio setup changed. Check both filters and Two speakers at streamtranslate.live, then press Reconnect.";
+}
+
 static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 			  void *user, void *in, size_t len)
 {
@@ -308,13 +324,23 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 
 	switch (reason) {
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
-        f->connected = true;
-        if (!st_user_paused(f)) st_set_status(f, "Connected to %s - streaming audio", f->server);
-		f->last_health_ns=0;
+		if (!st_user_paused(f)) st_set_status(f, "Connected — waiting for audio");
+        f->audio_started = false;
+        f->waiting_primary = false;
+		f->connected = true;
+        memset(&f->cc_state,0,sizeof(f->cc_state));
+        memset(&f->cc_fragments,0,sizeof(f->cc_fragments));
+        f->cc_ack_count=f->cc_ack_read=0;f->cc_ack_last=false;
+		f->last_health_ns=0; f->last_source_metadata_ns=0;
 		st_health_snapshot(f);
 		lws_callback_on_writable(wsi);
 		break;
 
+	case LWS_CALLBACK_CLIENT_RECEIVE: {
+        const char *message=st_cc_fragment(&f->cc_fragments,in,len,lws_is_first_fragment(wsi),lws_is_final_fragment(wsi)&&!lws_remaining_packet_payload(wsi),lws_frame_is_binary(wsi));
+        if(message)st_cc_receive(f,message);
+        break;
+    }
 	case LWS_CALLBACK_CLIENT_WRITEABLE: {
         // Stop has priority over health/PCM. All socket operations stay on this
         // service thread; the UI only marks intent and cancels the service wait.
@@ -341,6 +367,36 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         }
         pthread_mutex_unlock(&f->qlock);
         if (paused) { st_queue_clear(f); return 0; }
+        /* Alternate ACK/audio writes when both queues have work: neither can
+         * starve the other, and the existing capture-stop check stays first. */
+        pthread_mutex_lock(&f->qlock);bool cc_audio_pending=f->qcount>0;pthread_mutex_unlock(&f->qlock);
+        if(f->cc_ack_count && (!f->cc_ack_last || !cc_audio_pending)) {
+            unsigned char payload[LWS_PRE+256];const char *ack=f->cc_acks[f->cc_ack_read];size_t size=strlen(ack);
+            memcpy(payload+LWS_PRE,ack,size);
+            int wrote=lws_write(wsi,payload+LWS_PRE,size,LWS_WRITE_TEXT);
+            if(wrote!=(int)size)return -1;
+            f->cc_ack_read=(f->cc_ack_read+1)%8;f->cc_ack_count--;f->cc_ack_last=true;
+            lws_callback_on_writable(wsi);return 0;
+        }
+        /* Publish the parent source, not the filter name. Control derives its
+         * meters from the very same PCM frames; metadata alone is not audio. */
+        uint64_t metadata_now=os_gettime_ns();
+        if(!f->last_source_metadata_ns || metadata_now-f->last_source_metadata_ns>=1000000000ULL){
+            f->last_source_metadata_ns=metadata_now;
+            obs_source_t *parent=obs_filter_get_parent(f->context);
+            obs_data_t *metadata=obs_data_create();
+            obs_data_set_string(metadata,"type","obs_source");obs_data_set_int(metadata,"v",1);
+            obs_data_set_string(metadata,"name",parent?obs_source_get_name(parent):"OBS audio source");
+            obs_data_set_string(metadata,"sourceId",parent?obs_source_get_uuid(parent):"");
+            obs_data_set_bool(metadata,"canSelect",false);
+            const char *json=obs_data_get_json(metadata);size_t size=strlen(json);
+            unsigned char payload[LWS_PRE+2048];
+            int wrote=-1;
+            if(size<=2048){memcpy(payload+LWS_PRE,json,size);wrote=lws_write(wsi,payload+LWS_PRE,size,LWS_WRITE_TEXT);}
+            obs_data_release(metadata);
+            if(wrote!=(int)size)return -1;
+            lws_callback_on_writable(wsi);return 0;
+        }
         if(f->health_count){
             unsigned char payload[LWS_PRE+2048];
             const char *text=f->health_ring[f->health_read];size_t size=strlen(text);
@@ -360,6 +416,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		if (c) {
             // Serialize the final write check with Stop. A chunk popped just
             // before Stop cannot escape after the button handler returns.
+            f->cc_ack_last=false;
             pthread_mutex_lock(&f->qlock);
             if (f->user_paused) {
                 pthread_mutex_unlock(&f->qlock);
@@ -375,6 +432,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 			free(c->buf);
 			free(c);
             if(write_failed)return -1;
+            if(!f->audio_started){f->audio_started=true;st_set_status(f,"Connected — sending audio · %s",f->sending_stereo?"Mic 1 left / Mic 2 right":f->speaker==1?"Mic 2":"Mic 1");}
 			lws_callback_on_writable(wsi);
 		}
 		break;
@@ -396,17 +454,25 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 		break;
 
     case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
-        if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1];f->last_close_code=code;
+        if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1]; f->last_close_code=code;
             blog(LOG_INFO,"[streamtranslate] Server close code: %u",code);
-            if(st_close_policy(code)==ST_RETRY_MANUAL && code!=4001 && code!=4009){
+            char reason[160]={0};size_t reason_len=len-2<sizeof(reason)-1?len-2:sizeof(reason)-1;memcpy(reason,p+2,reason_len);
+            bool primary_pending=f->speaker==1 && code==4409 && !strcmp(reason,"Streamer is not live");
+            f->waiting_primary=primary_pending;
+            if(primary_pending) st_set_status(f,"%s",st_setup_close_message(reason));
+            bool changed=code==4409 && (!strcmp(reason,"Stream control changed; reconnect") || !strcmp(reason,"Streamer input changed; reconnect"));
+            if(st_close_policy(code)==ST_RETRY_MANUAL && code!=4001 && code!=4009 && !changed && !primary_pending){
                 pthread_mutex_lock(&f->qlock);f->terminal_paused=true;pthread_mutex_unlock(&f->qlock);
-                st_set_status(f,"%s (code %u)",st_close_message(code),code);
+                st_set_status(f,code==4008 ? "Stopped after idle timeout. Press Start sending audio to start again." :
+                    code==4409 ? st_setup_close_message(reason) :
+                    code==4403 ? "Plugin key rejected. Update your Plugin Key, then press Reconnect." :
+                    "Session stopped by server. Check your account, then press Reconnect.");
             }
             if(st_close_policy(code)==ST_RETRY_AUDIO){
                 pthread_mutex_lock(&f->qlock);f->waiting_audio=true;f->retry_after_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
                 st_set_status(f,"No audio received. Waiting for the OBS source to send audio before retrying.");
             }
-            if(code==4001 || code==4009){pthread_mutex_lock(&f->qlock);f->conflict_paused=true;pthread_mutex_unlock(&f->qlock);st_set_status(f,"Another audio source is active. Press Start sending audio only to switch back to this filter.");}
+            if(code==4001 || code==4009){pthread_mutex_lock(&f->qlock);f->conflict_paused=true;pthread_mutex_unlock(&f->qlock);st_set_status(f,"Another filter already sends this mic. Adding a second mic? Choose Two speakers > Two separate OBS sources > Mic 2. To replace a mic, stop its old filter and start sending audio here.");}
         }
         break;
 	case LWS_CALLBACK_CLIENT_CLOSED:
@@ -415,7 +481,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         pthread_mutex_unlock(&f->qlock);
         st_queue_clear(f);
 		if (st_user_paused(f)) st_set_status(f, "Paused - not sending audio. Press Start sending audio to resume.");
-        else if(!f->conflict_paused && !f->terminal_paused && !f->waiting_audio) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
+        else if(!f->conflict_paused && !f->terminal_paused && !f->waiting_audio && !f->waiting_primary) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
 		break;
@@ -440,11 +506,14 @@ static void st_connect(struct st_filter *f)
 		return;
 	}
 
-	char path[640], capture_id[48];
+	char path[768], capture_id[48];
     pthread_mutex_lock(&f->qlock);snprintf(capture_id,sizeof(capture_id),"%s",f->capture_id);pthread_mutex_unlock(&f->qlock);
-	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&captureId=%s&transportVersion=%s%s",
+	snprintf(path, sizeof(path), "/audio?pluginKey=%s&rate=%u&tabId=%s&captureId=%s&transportVersion=%s&cfgSpeakers=%d%s%s%s",
          f->plugin_key, f->sample_rate,f->filter_id,capture_id,ST_PLUGIN_VERSION,
-         f->sending_stereo ? "&channels=2" : "");
+         f->two_speakers ? 2 : 1,
+         f->sending_stereo ? "&channels=2&cfgInput=receiver" : "&cfgInput=separate",
+         f->speaker == 1 ? "&speaker=1" : "",
+         f->native_twitch_cc && f->speaker==0 ? "&native_cc=1&native_cc_interim=1" : "");
     pthread_mutex_lock(&f->qlock);f->reconnects++;pthread_mutex_unlock(&f->qlock);
 
 	struct lws_client_connect_info ci;
@@ -459,7 +528,7 @@ static void st_connect(struct st_filter *f)
 	ci.protocol = NULL; /* server doesn't negotiate a subprotocol */
 	ci.local_protocol_name = "st-audio";
 
-	st_set_status(f, "Connecting to %s ...", f->server);
+	st_set_status(f, "Connecting…");
 	f->wsi = lws_client_connect_via_info(&ci);
 	if (!f->wsi)
 		st_set_status(f, "Could not start connection to %s - check the Server field", f->server);
@@ -560,14 +629,14 @@ static void *st_ws_thread(void *arg)
 	}
 
     lws_sul_schedule(f->lws_ctx,0,&f->service_pulse,st_service_pulse,LWS_US_PER_SEC);
-	uint64_t last_status = 0;
+
 	while (!f->stop) {
 		st_health_snapshot(f);
 		pthread_mutex_lock(&f->qlock);
         if(f->waiting_audio && st_audio_can_retry(f->last_usable_audio_ns,f->retry_after_audio_ns,os_gettime_ns())) f->waiting_audio=false;
         bool waiting_audio=f->waiting_audio;
         pthread_mutex_unlock(&f->qlock);
-        if (!f->wsi && !f->conflict_paused && !st_user_paused(f) && !f->terminal_paused && !waiting_audio) {
+        if (!f->wsi && !f->conflict_paused && !st_user_paused(f) && !f->terminal_paused && !waiting_audio && !f->resampler_dirty) {
 			uint64_t now = os_gettime_ns();
 			if (now >= next_retry) {
 				st_connect(f);
@@ -587,12 +656,16 @@ static void *st_ws_thread(void *arg)
             // Includes an unfinished handshake: Stop must remain bounded even
             // when the peer never becomes writeable. No receipt is claimed.
             lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
-        } else if (f->wsi && f->connected && (pending > 0 || f->health_count > 0 || stop_phase)) {
+        } else if (f->wsi && f->connected && (pending > 0 || f->health_count > 0 || f->cc_ack_count || stop_phase)) {
             lws_callback_on_writable(f->wsi);
         }
 		lws_service(f->lws_ctx, 20);
+        // Packet counters remain in audio_health diagnostics. Rebuilding all
+        // Qt properties every two seconds closes open source/role dropdowns.
+        // Only connection-state changes may rebuild this form.
+        st_publish_status(f);
 
-        st_refresh_live_status(f, os_gettime_ns(), &last_status);
+
 	}
 
     lws_sul_cancel(&f->service_pulse);
@@ -651,13 +724,29 @@ static void st_update(void *data, obs_data_t *settings)
 	const char *server = obs_data_get_string(settings, "server");
 	const char *key = obs_data_get_string(settings, "plugin_key");
 
-	/* Two-speaker capture is experimental and must not activate in public builds,
-	   including when an older OBS scene has stereo_split=true saved. */
-	bool stereo = false;
+	/* mic_mode: 0 = Mic 1, 1 = Mic 2, 2 = stereo pair (left = Mic 1, right = Mic 2) */
+    /* OBS may invoke update before the property's modified callback. Derive
+     * the transport mode here too so the selection is never one click behind. */
+    if (obs_data_has_user_value(settings, "speaker_count")) {
+        bool two = obs_data_get_int(settings, "speaker_count") == 2;
+        bool separate = two && obs_data_get_int(settings, "mic_wiring") == 1;
+        bool second = separate && obs_data_get_int(settings, "source_role") == 1;
+        obs_data_set_int(settings, "mic_mode", !two ? 0 : !separate ? 2 : second ? 1 : 0);
+    }
+	long long mic_mode = obs_data_get_int(settings, "mic_mode");
+	bool stereo = mic_mode == 2;
+    bool two = obs_data_get_int(settings, "speaker_count") == 2 || mic_mode != 0;
+    if (two) obs_data_set_bool(settings, "native_twitch_cc", false);
+    bool native_cc = !two && obs_data_get_bool(settings, "native_twitch_cc");
+	int speaker = mic_mode == 1 ? 1 : 0;
 
 	bool changed = strcmp(f->server, server ? server : "") != 0 ||
 		       strcmp(f->plugin_key, key ? key : "") != 0 ||
-		       stereo != f->stereo_split;
+		       stereo != f->stereo_split ||
+		       speaker != f->speaker || native_cc != f->native_twitch_cc || two != f->two_speakers;
+	f->speaker = speaker;
+    f->native_twitch_cc=native_cc;
+    f->two_speakers=two;
 
 	snprintf(f->server, sizeof(f->server), "%s", server ? server : "");
 	snprintf(f->plugin_key, sizeof(f->plugin_key), "%s", key ? key : "");
@@ -673,9 +762,10 @@ static void st_update(void *data, obs_data_t *settings)
 
 	if (changed) {
         f->terminal_paused=false;
-    f->last_close_code=0;f->conflict_paused=false;
+        f->last_close_code=0;f->waiting_primary=false;f->conflict_paused=false;
         pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
     }
+    if (changed) st_queue_clear(f);
     if (changed && f->wsi) {
 		/* reconnect with new credentials: close current, thread will redial */
 		lws_set_timeout(f->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
@@ -687,13 +777,18 @@ static void *st_create(obs_data_t *settings, obs_source_t *context)
 {
 	struct st_filter *f = bzalloc(sizeof(struct st_filter));
 	f->context = context;
+    atomic_init(&f->native_twitch_cc,false);
+    atomic_init(&f->two_speakers,false);
+    atomic_init(&f->audio_started,false);
+    atomic_init(&f->stop,false);
     snprintf(f->filter_id,sizeof(f->filter_id),"filter-%" PRIx64,os_gettime_ns());
 	pthread_mutex_init(&f->qlock, NULL);
     pthread_cond_init(&f->test_ready, NULL);
     char *capture_uuid=os_generate_uuid();
     snprintf(f->capture_id,sizeof(f->capture_id),"%s",capture_uuid);bfree(capture_uuid);
-	st_build_resampler(f);
 	st_update(f, settings);
+	st_build_resampler(f);
+    f->resampler_dirty = false;
 	f->stop = false;
 	pthread_create(&f->thread, NULL, st_ws_thread, f);
 	return f;
@@ -736,8 +831,8 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 		if (!f->muted_now) {
 			f->muted_now = true;
             st_queue_clear(f);
-			st_set_status(f, "Muted in OBS - not sending audio (captured %d, sent %d)",
-				      f->audio_chunks_captured, f->audio_chunks_sent);
+			st_set_status(f, "Muted in OBS — audio is not being sent");
+            f->audio_started=false;
 		}
 		return audio;
 	}
@@ -745,8 +840,8 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 		f->muted_now = false;
 	if (f->resampler_dirty) {
 		/* Owned by this thread -- safe to destroy and recreate here. */
-		f->resampler_dirty = false;
 		st_build_resampler(f);
+		f->resampler_dirty = false;
 	}
 	if (!f->resampler) {
 		st_build_resampler(f); /* audio subsystem may not have been ready at create time */
@@ -807,7 +902,7 @@ static bool st_stop_clicked(obs_properties_t *props, obs_property_t *prop, void 
     st_set_status(f, "Paused - not sending audio. Press Start sending audio to resume.");
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
-	return true;
+	return false;
 }
 
 static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
@@ -825,7 +920,7 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
     pthread_mutex_unlock(&f->qlock);
 	pthread_mutex_lock(&f->qlock);f->conflict_paused=false;
     f->terminal_paused=false;pthread_mutex_unlock(&f->qlock);
-    f->last_close_code=0;
+    f->last_close_code=0;f->waiting_primary=false;
     pthread_mutex_lock(&f->qlock);f->waiting_audio=false;pthread_mutex_unlock(&f->qlock);
     pthread_mutex_lock(&f->qlock);
     f->user_paused=false; f->stop_phase=0; f->stop_deadline_ns=0;
@@ -836,7 +931,66 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	}
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
-	return true;
+	return false;
+}
+
+#ifdef __APPLE__
+bool st_copy_plugin_key_to_clipboard(const char *key);
+
+static bool st_copy_plugin_key_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
+{
+    (void)props;
+    struct st_filter *filter = data;
+    if (!filter || !filter->context)
+        return false;
+
+    /* OBS's filter properties editor writes text edits into this settings
+     * object immediately, before its deferred undo/update callback. */
+    obs_data_t *settings = obs_source_get_settings(filter->context);
+    const char *key = obs_data_get_string(settings, "plugin_key");
+    const char *label = "Enter a plugin key first";
+    if (key && *key)
+        label = st_copy_plugin_key_to_clipboard(key) ? "Plugin key copied" : "Could not copy plugin key";
+    obs_data_release(settings);
+
+    obs_property_set_description(prop, label);
+    return true;
+}
+#endif
+
+/* mic_mode remains the transport setting for saved-scene compatibility.
+ * The panel separates speaker count, wiring and source assignment. */
+static bool st_setup_properties(obs_properties_t *props, obs_property_t *property,
+                                obs_data_t *settings)
+{
+    (void)property;
+    bool two = obs_data_get_int(settings, "speaker_count") == 2;
+    bool separate = two && obs_data_get_int(settings, "mic_wiring") == 1;
+    bool second = separate && obs_data_get_int(settings, "source_role") == 1;
+    obs_data_set_int(settings, "mic_mode", !two ? 0 : !separate ? 2 : second ? 1 : 0);
+    obs_property_set_visible(obs_properties_get(props, "mic_wiring"), two);
+    obs_property_set_visible(obs_properties_get(props, "source_role"), separate);
+    if (two) obs_data_set_bool(settings, "native_twitch_cc", false);
+    obs_property_set_enabled(obs_properties_get(props, "native_twitch_cc"), !two);
+    obs_property_set_description(obs_properties_get(props, "native_help"), two ?
+        "Native Twitch CC requires 1 speaker. Use a browser overlay for 2 speakers." :
+        "Optional Twitch CC button. Set language in Control. Change before streaming.");
+    obs_property_set_description(obs_properties_get(props, "audio_help"), !two ?
+        "Languages and caption output: choose them at streamtranslate.live." : separate ?
+        "Add this filter to each OBS source. Assign Mic 1 to one and Mic 2 to the other." :
+        "Receiver in stereo: left = Mic 1, right = Mic 2. Enable Two speakers at streamtranslate.live.");
+    return true;
+}
+
+/* Status refresh can rebuild properties during a selection. Never overwrite
+ * explicit new-panel choices with the previous transport's mic_mode. */
+static void st_migrate_setup(obs_data_t *settings)
+{
+    if (obs_data_has_user_value(settings, "speaker_count")) return;
+    long long mode = obs_data_get_int(settings, "mic_mode");
+    obs_data_set_int(settings, "speaker_count", mode == 0 ? 1 : 2);
+    obs_data_set_int(settings, "mic_wiring", mode == 1 ? 1 : 0);
+    obs_data_set_int(settings, "source_role", mode == 1 ? 1 : 0);
 }
 
 static bool st_audio_toggle_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
@@ -880,32 +1034,48 @@ static void st_diagnostic_text(struct st_filter *f, char *out, size_t size)
 
 static obs_properties_t *st_get_properties(void *data)
 {
-	struct st_filter *f = data;
-	obs_properties_t *props = obs_properties_create();
-
+    struct st_filter *f = data;
+    obs_properties_t *props = obs_properties_create();
     st_update_properties(props, f);
+    obs_properties_add_text(props, "status_text", "", OBS_TEXT_INFO);
+    obs_properties_add_text(props, "plugin_key", "Plugin key", OBS_TEXT_PASSWORD);
+#ifdef __APPLE__
+    obs_properties_add_button2(props, "copy_plugin_key", "⧉ Copy Plugin Key", st_copy_plugin_key_clicked, f);
+#endif
+    obs_property_t *count = obs_properties_add_list(props, "speaker_count", "Speakers",
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(count, "1 speaker", 1);
+    obs_property_list_add_int(count, "2 speakers", 2);
+    obs_property_t *wiring = obs_properties_add_list(props, "mic_wiring", "Microphones",
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(wiring, "One receiver (stereo)", 0);
+    obs_property_list_add_int(wiring, "Two separate OBS sources", 1);
+    obs_property_t *role = obs_properties_add_list(props, "source_role", "This source",
+        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(role, "Mic 1", 0);
+    obs_property_list_add_int(role, "Mic 2", 1);
+    obs_property_set_modified_callback(count, st_setup_properties);
+    obs_property_set_modified_callback(wiring, st_setup_properties);
+    obs_property_set_modified_callback(role, st_setup_properties);
+    obs_properties_add_text(props, "audio_help",
+        "Languages and caption output: choose them at streamtranslate.live.", OBS_TEXT_INFO);
 
-	obs_properties_add_text(props, "plugin_key",
-				"Plugin Key (from your StreamTranslate account)",
-				OBS_TEXT_PASSWORD);
-	obs_properties_add_text(props, "server", "Server", OBS_TEXT_DEFAULT);
+    obs_properties_t *advanced = obs_properties_create();
+    obs_properties_add_text(advanced, "server", "Server", OBS_TEXT_DEFAULT);
+    obs_properties_add_bool(advanced, "native_twitch_cc", "Enable native Twitch CC");
+    obs_properties_add_text(advanced, "native_help",
+        "Optional Twitch CC button. Set language in Control. Change before streaming.", OBS_TEXT_INFO);
+    obs_properties_add_group(props, "more_settings", "More settings", OBS_GROUP_NORMAL, advanced);
 
-
-	/* live status — updated by the connection thread */
-	obs_property_t *st = obs_properties_add_text(props, "status_text", "Status", OBS_TEXT_INFO);
-	if (f) {
-		char line[420];
-		pthread_mutex_lock(&f->qlock);
-        snprintf(line, sizeof(line), "%s", f->status[0] ? f->status : "Starting up ...");
+    obs_data_t *settings = f ? obs_source_get_settings(f->context) : obs_data_create();
+    st_migrate_setup(settings);
+    if (f) {
+        pthread_mutex_lock(&f->qlock);
+        obs_data_set_string(settings, "status_text", f->status[0] ? f->status : "Starting up…");
         pthread_mutex_unlock(&f->qlock);
-		(void)st; /* No fake question-mark button: diagnostics has a real control. */
-		obs_data_t *s = obs_source_get_settings(f->context);
-		if (s) {
-			obs_data_set_string(s, "status_text", line);
-			obs_data_release(s);
-		}
-	}
-
+    }
+    st_setup_properties(props, NULL, settings);
+    obs_data_release(settings);
     obs_properties_add_button2(props, "show_diagnostics",
         f && f->show_diagnostics ? "Hide diagnostics / help" : "Show diagnostics / help",
         st_diagnostics_clicked, f);
@@ -940,14 +1110,16 @@ static obs_properties_t *st_get_properties(void *data)
         obs_data_set_string(settings, "connection_test_text", test_result);
         obs_data_release(settings);
     }
-	return props;
+    return props;
 }
 
 static void st_get_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_string(settings, "server", "streamtranslate.live");
-	obs_data_set_default_string(settings, "plugin_key", "");
-	obs_data_set_default_bool(settings, "stereo_split", false);
+    obs_data_set_default_string(settings, "server", "streamtranslate.live");
+    obs_data_set_default_string(settings, "plugin_key", "");
+    obs_data_set_default_int(settings, "mic_mode", 0);
+    obs_data_set_default_bool(settings, "native_twitch_cc", false);
+    obs_data_set_default_bool(settings, "advanced", false);
 }
 
 static struct obs_source_info st_filter_info = {

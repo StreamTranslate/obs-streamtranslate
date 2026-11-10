@@ -32,12 +32,13 @@ class WindowsPackageTests(unittest.TestCase):
                 self.assertEqual(archive.read(prefix + self.dll.name), self.dll.read_bytes())
                 self.assertEqual(archive.read(prefix + self.ca.name), self.ca.read_bytes())
             self.assertIn('obs-streamtranslate/data/', archive.namelist())
+            self.assertEqual(archive.read('LICENSE-libcaption.txt'), (ROOT / 'LICENSE-libcaption.txt').read_bytes())
             self.assertFalse(any(name.startswith('obs-plugins/') for name in archive.namelist()))
 
     def test_older_portable_package_retains_existing_layout(self):
         _, legacy = self.package()
         with ZipFile(legacy) as archive:
-            self.assertEqual(set(archive.namelist()), {'obs-plugins/64bit/obs-streamtranslate.dll', 'obs-plugins/64bit/cacert.pem'})
+            self.assertEqual(set(archive.namelist()), {'obs-plugins/64bit/obs-streamtranslate.dll', 'obs-plugins/64bit/cacert.pem', 'LICENSE-libcaption.txt', 'libwebsockets-LICENSE.txt'})
             self.assertEqual(archive.read('obs-plugins/64bit/obs-streamtranslate.dll'), self.dll.read_bytes())
             self.assertIsNone(archive.testzip())
 

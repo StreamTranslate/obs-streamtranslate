@@ -19,12 +19,22 @@ Two pieces, and they do different jobs:
 
 Filter = the microphone. Browser source = the screen.
 
-Public releases use one combined audio/caption stream. Two-speaker mode is not
-available yet. Version 0.1.11 removes its unfinished checkbox and ignores an
-older saved stereo-split setting. Separate development builds are for staging
-tests only; they are not part of these downloads.
+## Two speakers and native Twitch CC
 
-## Version and update notice (0.1.12 candidate)
+- **Two speakers (Elite):** For a stereo receiver, attach one filter and select
+  **Two speakers → One receiver**. Set your receiver to split its two transmitters
+  left and right. For independent audio inputs, attach the filter to each OBS
+  source with the same Plugin Key, choose **Two speakers → Two separate OBS
+  sources**, and assign one filter to each mic. If Mic 2 connects first, it
+  automatically retries when Mic 1 starts. In Control, select Split View for one
+  Browser Source or Separate Overlays for independent placement.
+- **Native Twitch CC:** Select **One speaker** in the filter, enable Twitch CC
+  there, then enable it and pick one caption language in StreamTranslate Control.
+  Viewers use the Twitch player's CC button. Two speakers use Browser Source
+  captions. The existing Twitch extension is a separate caption output.
+- **Plugin Key:** Use the copy icon beside the key to paste it into another filter.
+
+## Version and update notice
 
 The filter properties show the installed plugin version, a **Check for updates**
 button and a link to the official downloads/release notes. A newer stable release
@@ -47,7 +57,6 @@ package). If unavailable, captions still work and the downloads link remains.
 Older installed versions cannot acquire this UI remotely: users must install
 the new plugin once. Cloud OBS users without a browser can copy this URL to their
 own device: https://github.com/StreamTranslate/obs-streamtranslate/releases/latest.
-This candidate has not been published or installed by this change.
 
 ## Install
 
@@ -113,8 +122,7 @@ Everything after that you do yourself from your OBS remote.
    under *Cloud OBS / IRL Mode*)
 3. Add your overlay URL as a **Browser Source** to display the captions
 
-The filter shows a live status line — it counts audio as you speak when
-connected (refreshed once per second), and names the problem when it isn't.
+The filter shows connection status and the assigned microphone. Open **Diagnostics** to see audio counters; Control shows live meters for each OBS input.
 
 ## Using it
 

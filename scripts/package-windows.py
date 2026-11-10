@@ -19,9 +19,13 @@ def package_windows(dll, certificates, output):
     output.mkdir(parents=True, exist_ok=True)
     module = 'obs-streamtranslate'
     files = {module + '.dll': binary, 'cacert.pem': certificate_data}
+    repo = Path(__file__).resolve().parents[1]
+    licenses = [repo / 'LICENSE-libcaption.txt', repo / 'third-party/libwebsockets-LICENSE.txt']
     modern = output / 'StreamTranslate-OBS-Plugin-Windows.zip'
     legacy = output / 'StreamTranslate-OBS-Plugin-Windows-OBS32-Portable.zip'
     with ZipFile(modern, 'w', compression=ZIP_DEFLATED) as archive:
+        for license_file in licenses:
+            archive.writestr(license_file.name, license_file.read_bytes())
         archive.writestr(f'{module}/data/', b'')
         for name, content in files.items():
             # OBS 33+: new flat layout. OBS 32: same ProgramData module's bin/64bit.
@@ -29,6 +33,8 @@ def package_windows(dll, certificates, output):
             archive.writestr(f'{module}/{name}', content)
             archive.writestr(f'{module}/bin/64bit/{name}', content)
     with ZipFile(legacy, 'w', compression=ZIP_DEFLATED) as archive:
+        for license_file in licenses:
+            archive.writestr(license_file.name, license_file.read_bytes())
         for name, content in files.items():
             archive.writestr(f'obs-plugins/64bit/{name}', content)
     return modern, legacy
