@@ -154,6 +154,14 @@ jobs:
       - name: Fetch libobs headers
         run: git clone --depth 1 --branch 31.0.3 https://github.com/obsproject/obs-studio.git
         shell: cmd
+      - name: Select the portable OBS arithmetic path for clang-cl
+        shell: pwsh
+        run: |
+          $header = 'obs-studio/libobs/util/util_uint64.h'
+          $original = '#if defined(_MSC_VER) && defined(_M_X64) && (_MSC_VER >= 1920)'
+          $source = Get-Content -Raw $header
+          if (!$source.Contains($original)) { throw 'Expected OBS _udiv128 guard was not found' }
+          $source.Replace($original, "$original && !defined(__clang__)") | Set-Content -NoNewline $header
       - name: Download OBS release (for obs.dll)
         shell: pwsh
         run: |
