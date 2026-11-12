@@ -197,7 +197,7 @@ jobs:
       - name: Compile plugin DLL
         shell: cmd
         run: |
-          cl /nologo /O2 /MT /std:c17 /experimental:c11atomics /LD plugin.c ^
+          clang-cl /nologo /O2 /MT /std:c17 /LD plugin.c ^
             /I obs-studio\libobs /I genhdr ^
             /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
             /Fe:obs-streamtranslate.dll ^
@@ -210,7 +210,7 @@ jobs:
         shell: cmd
         run: |
           cl /nologo /O2 tests/update-fast-helper.c /Fe:update-fast-helper.exe
-          cl /nologo /O2 /MT /std:c17 /experimental:c11atomics tests/windows-update-drain-harness.c ^
+          clang-cl /nologo /O2 /MT /std:c17 tests/windows-update-drain-harness.c ^
             /I obs-studio\libobs /I genhdr ^
             /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
             /Fe:windows-update-drain.exe ^
