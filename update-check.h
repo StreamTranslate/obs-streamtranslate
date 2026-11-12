@@ -69,8 +69,8 @@ static void st_update_refresh_filter(obs_source_t *parent, obs_source_t *filter,
 {
     (void)parent; (void)param;
     if (strcmp(obs_source_get_id(filter), "streamtranslate_audio_filter") != 0) return;
-    obs_source_t *ref = obs_source_get_ref(filter);
-    if (ref) obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, ref, false);
+    struct st_filter *f = obs_obj_get_data(filter);
+    if (f) st_queue_properties_refresh(f->source_ref);
 }
 
 static bool st_update_refresh_source(void *param, obs_source_t *source)

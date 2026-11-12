@@ -4,6 +4,7 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     assert(access(argv[1], R_OK) == 0);
+    st_resolve_ca_bundle_path();
     const char *selected = st_ca_bundle_path();
     assert(selected && !strcmp(selected, argv[1]));
     assert(access(selected, R_OK) == 0);

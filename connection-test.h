@@ -77,10 +77,7 @@ static void *st_connection_test_worker(void *data)
             "Could not verify server health. Audio unchanged; check your network and Server setting.");
         bool notify = !f->test_stop;
         pthread_mutex_unlock(&f->qlock);
-        if (notify) {
-            obs_source_t *ref = obs_source_get_ref(f->context);
-            if (ref) obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, ref, false);
-        }
+        if (notify) st_queue_properties_refresh(f->source_ref);
         pthread_mutex_lock(&f->qlock);
     }
     pthread_mutex_unlock(&f->qlock);

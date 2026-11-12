@@ -38,16 +38,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: brew install libwebsockets pkg-config simde
-      - name: Fetch pinned macOS 14-compatible bundled libraries
+        run: brew install cmake pkg-config simde
+      - name: Build pinned OpenSSL for macOS 14
         run: |
-          curl -fL --retry 3 -o previous.pkg \
-            https://github.com/StreamTranslate/obs-streamtranslate/releases/download/v0.1.6/StreamTranslate-OBS-Plugin.pkg
-          echo 'b906091c450e419476a32a00bfa66d6ec7ceea82f5db756d2808f3e26214b274  previous.pkg' | shasum -a 256 -c -
-          pkgutil --expand-full previous.pkg previous-pkg
-          mkdir -p dist/obs-streamtranslate.plugin/Contents/Frameworks
-          cp previous-pkg/component.pkg/Payload/Library/Application\ Support/StreamTranslate/obs-streamtranslate.plugin/Contents/Frameworks/*.dylib \
-            dist/obs-streamtranslate.plugin/Contents/Frameworks/
+          mkdir -p build-deps
+          cd build-deps
+          curl -fL --retry 3 -O https://github.com/openssl/openssl/releases/download/openssl-3.6.4/openssl-3.6.4.tar.gz
+          echo '9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef  openssl-3.6.4.tar.gz' | shasum -a 256 -c -
+          tar -xzf openssl-3.6.4.tar.gz
+          ssl_prefix="$PWD/openssl"
+          cd openssl-3.6.4
+          ./Configure darwin64-arm64-cc no-shared no-module no-tests --prefix="$ssl_prefix" -mmacosx-version-min=14.0
+          make -j"$(sysctl -n hw.logicalcpu)" build_sw
+          make install_sw
       - name: Fetch libobs headers
         run: git clone --depth 1 --branch 32.2.2 https://github.com/obsproject/obs-studio.git
       - name: Compile plugin bundle
@@ -65,13 +68,14 @@ jobs:
           #define OBS_RELEASE_CANDIDATE 0
           #define OBS_BETA 0
           HDR
-          clang -bundle -O2 -mmacosx-version-min=14.0 -o dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate \
-            plugin.c clipboard-macos.m -framework AppKit \
-            -I obs-studio/libobs \
-            -I genhdr \
-            -I $(brew --prefix)/include \
-            $(pkg-config --cflags --libs libwebsockets) \
-            -undefined dynamic_lookup
+          cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DST_MACOS_OBS_HEADERS="$PWD/obs-studio/libobs" -DST_MACOS_OBS_CONFIG="$PWD/genhdr" \
+            -DST_MACOS_SIMDE_INCLUDE="$(brew --prefix simde)/include" \
+            -DLWS_OPENSSL_INCLUDE_DIRS="$PWD/build-deps/openssl/include" \
+            -DLWS_OPENSSL_LIBRARIES="$PWD/build-deps/openssl/lib/libssl.a;$PWD/build-deps/openssl/lib/libcrypto.a"
+          cmake --build build-mac --parallel
+          cp build-mac/obs-streamtranslate dist/obs-streamtranslate.plugin/Contents/MacOS/
           cat > dist/obs-streamtranslate.plugin/Contents/Info.plist << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -85,25 +89,22 @@ jobs:
           </dict>
           </plist>
           PLIST
-      - name: Bundle CA certificates
+      - name: Bundle CA certificates and licenses
         run: |
           mkdir -p dist/obs-streamtranslate.plugin/Contents/Resources
           curl -fsSL -o dist/obs-streamtranslate.plugin/Contents/Resources/cacert.pem https://curl.se/ca/cacert.pem
           cp LICENSE-libcaption.txt third-party/libwebsockets-LICENSE.txt dist/obs-streamtranslate.plugin/Contents/Resources/
-      - name: Link pinned macOS 14-compatible libraries
+          cp build-deps/openssl-3.6.4/LICENSE.txt dist/obs-streamtranslate.plugin/Contents/Resources/LICENSE-OpenSSL.txt
+      - name: Verify macOS compatibility and library linkage
         run: |
-          BIN=dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate
-          FW=dist/obs-streamtranslate.plugin/Contents/Frameworks
-          LWS=$(otool -L "$BIN" | awk '/libwebsockets/ {print $1}')
-          install_name_tool -change "$LWS" '@loader_path/../Frameworks/libwebsockets.22.dylib' "$BIN"
-          for lib in "$BIN" "$FW"/*.dylib; do
-            minos=$(otool -l "$lib" | awk '/LC_BUILD_VERSION/{seen=1} seen && /minos/{print $2; exit}')
-            test "$minos" = '14.0' || { echo "Unsupported minimum $minos: $lib"; exit 1; }
-          done
-          codesign --force --sign - "$FW"/*.dylib "$BIN"
-          echo "--- final link check ---"
+          bundle=dist/obs-streamtranslate.plugin
+          BIN="$bundle/Contents/MacOS/obs-streamtranslate"
+          test "$(lipo -archs "$BIN")" = arm64
+          test "$(xcrun vtool -show-build "$BIN" | awk '/minos/{print $2}')" = 14.0
           otool -L "$BIN"
-          otool -L "$FW/libwebsockets.22.dylib"
+          otool -L "$BIN" | awk 'NR > 1 && $1 !~ /^\/(usr\/lib|System\/Library\/Frameworks)\// {exit 1}'
+          codesign --force --sign - "$bundle"
+          codesign --verify --strict "$bundle"
       - name: Build branded .pkg installer
         run: |
           # OBS on Apple Silicon ONLY scans ~/Library/Application Support/obs-studio/plugins
