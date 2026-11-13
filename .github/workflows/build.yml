@@ -46,7 +46,7 @@ jobs:
           curl -fL --retry 3 -O https://github.com/openssl/openssl/releases/download/openssl-3.6.4/openssl-3.6.4.tar.gz
           echo '9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef  openssl-3.6.4.tar.gz' | shasum -a 256 -c -
           tar -xzf openssl-3.6.4.tar.gz
-          ssl_prefix="$PWD/openssl"
+          ssl_prefix="$RUNNER_TEMP/streamtranslate-openssl"
           cd openssl-3.6.4
           ./Configure darwin64-arm64-cc no-shared no-module no-tests --prefix="$ssl_prefix" -mmacosx-version-min=14.0
           make -j"$(sysctl -n hw.logicalcpu)" build_sw
@@ -72,8 +72,8 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DST_MACOS_OBS_HEADERS="$PWD/obs-studio/libobs" -DST_MACOS_OBS_CONFIG="$PWD/genhdr" \
             -DST_MACOS_SIMDE_INCLUDE="$(brew --prefix simde)/include" \
-            -DLWS_OPENSSL_INCLUDE_DIRS="$PWD/build-deps/openssl/include" \
-            -DLWS_OPENSSL_LIBRARIES="$PWD/build-deps/openssl/lib/libssl.a;$PWD/build-deps/openssl/lib/libcrypto.a"
+            -DLWS_OPENSSL_INCLUDE_DIRS="$RUNNER_TEMP/streamtranslate-openssl/include" \
+            -DLWS_OPENSSL_LIBRARIES="$RUNNER_TEMP/streamtranslate-openssl/lib/libssl.a;$RUNNER_TEMP/streamtranslate-openssl/lib/libcrypto.a"
           cmake --build build-mac --parallel
           cp build-mac/obs-streamtranslate dist/obs-streamtranslate.plugin/Contents/MacOS/
           cat > dist/obs-streamtranslate.plugin/Contents/Info.plist << 'PLIST'
