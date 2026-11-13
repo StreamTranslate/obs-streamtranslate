@@ -59,6 +59,7 @@ struct st_chunk {
 
 struct st_filter {
 	obs_source_t *context;
+	obs_weak_source_t *source_ref;
 
 	/* config */
 	char server[256];
@@ -135,24 +136,25 @@ struct st_filter {
 
 /* UI work must run after the current Qt event, never on the audio/WS thread.
  * A weak source reference also makes queued work safe after filter removal. */
-struct st_status_refresh {
-    obs_weak_source_t *source;
-    char text[320];
-};
 static void st_refresh_status_ui(void *data)
 {
-    struct st_status_refresh *refresh = data;
-    obs_source_t *source = obs_weak_source_get_source(refresh->source);
+    obs_weak_source_t *ref = data;
+    obs_source_t *source = obs_weak_source_get_source(ref);
     if (source) {
-        obs_data_t *settings = obs_source_get_settings(source);
-        obs_data_set_string(settings, "status_text", refresh->text);
-        obs_data_release(settings);
         obs_source_update_properties(source);
         obs_source_release(source);
     }
-    obs_weak_source_release(refresh->source);
-    bfree(refresh);
+    obs_weak_source_release(ref);
 }
+
+static void st_queue_properties_refresh(obs_weak_source_t *ref)
+{
+    if (!ref)
+        return;
+    obs_weak_source_addref(ref);
+    obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, ref, false);
+}
+
 static void st_set_status(struct st_filter *f, const char *fmt, ...)
 {
     char text[sizeof(f->status)];
@@ -177,13 +179,10 @@ static void st_set_status(struct st_filter *f, const char *fmt, ...)
 static void st_publish_status(struct st_filter *f)
 {
     pthread_mutex_lock(&f->qlock);
-    if (!f->status_dirty || !f->context) { pthread_mutex_unlock(&f->qlock); return; }
+    if (!f->status_dirty || !f->source_ref) { pthread_mutex_unlock(&f->qlock); return; }
     f->status_dirty = false;
-    struct st_status_refresh *refresh = bzalloc(sizeof(*refresh));
-    snprintf(refresh->text, sizeof(refresh->text), "%s", f->status);
     pthread_mutex_unlock(&f->qlock);
-    refresh->source = obs_source_get_weak_source(f->context);
-    obs_queue_task(OBS_TASK_UI, st_refresh_status_ui, refresh, false);
+    st_queue_properties_refresh(f->source_ref);
 }
 
 /* Numeric metadata only; this bounded ring survives network interruptions.
@@ -538,14 +537,17 @@ static void st_connect(struct st_filter *f)
  * verification fails silently without a CA file. We ship Mozilla's CA bundle
  * (cacert.pem) inside the plugin and point lws at it. Resolved relative to
  * this module's own binary location. */
+static char st_ca_bundle[1024];
+
 static const char *st_ca_bundle_path(void)
 {
-	static char path[1024];
-	static int resolved = 0;
-	if (resolved)
-		return path[0] ? path : NULL;
-	resolved = 1;
-	path[0] = 0;
+	/* Resolved once at module load before any filter starts its worker. */
+	return st_ca_bundle[0] ? st_ca_bundle : NULL;
+}
+
+static void st_resolve_ca_bundle_path(void)
+{
+	st_ca_bundle[0] = 0;
 #ifdef _WIN32
 	HMODULE hm = NULL;
 	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -557,7 +559,7 @@ static const char *st_ca_bundle_path(void)
 			char *slash = strrchr(mod, '\\');
 			if (slash) {
 				*slash = 0;
-				st_checked_path_join(path, sizeof(path), mod, "\\cacert.pem");
+				st_checked_path_join(st_ca_bundle, sizeof(st_ca_bundle), mod, "\\cacert.pem");
 			}
 		}
 	}
@@ -576,28 +578,27 @@ static const char *st_ca_bundle_path(void)
                 char *macos = strstr(mod, "/Contents/MacOS");
                 if (macos) {
                     *macos = 0;
-                    rejected_path = !st_checked_path_join(path, sizeof(path), mod,
+                    rejected_path = !st_checked_path_join(st_ca_bundle, sizeof(st_ca_bundle), mod,
                                                          "/Contents/Resources/cacert.pem");
                 } else {
-                    rejected_path = !st_checked_path_join(path, sizeof(path), mod, "/cacert.pem");
+                    rejected_path = !st_checked_path_join(st_ca_bundle, sizeof(st_ca_bundle), mod, "/cacert.pem");
                 }
             }
         }
     }
-    if (rejected_path || (path[0] && access(path, R_OK) != 0)) {
+    if (rejected_path || (st_ca_bundle[0] && access(st_ca_bundle, R_OK) != 0)) {
         /* Keep the existing readable canonical Linux store; never use a
          * truncated candidate or relax certificate verification. */
         if (access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0)
-            st_checked_path_join(path, sizeof(path), "/etc/ssl/certs/ca-certificates.crt", "");
+            st_checked_path_join(st_ca_bundle, sizeof(st_ca_bundle), "/etc/ssl/certs/ca-certificates.crt", "");
         else
-            path[0] = 0;
+            st_ca_bundle[0] = 0;
     }
 #endif
-	if (path[0])
-		blog(LOG_INFO, "[streamtranslate] CA bundle: %s", path);
+	if (st_ca_bundle[0])
+		blog(LOG_INFO, "[streamtranslate] CA bundle: %s", st_ca_bundle);
 	else
 		blog(LOG_WARNING, "[streamtranslate] no CA bundle found — TLS verification may fail");
-	return path[0] ? path : NULL;
 }
 
 #include "update-check.h"
@@ -777,6 +778,12 @@ static void *st_create(obs_data_t *settings, obs_source_t *context)
 {
 	struct st_filter *f = bzalloc(sizeof(struct st_filter));
 	f->context = context;
+	/* Acquire the weak reference while OBS owns the source. The worker
+	 * may publish status after the last source owner has released it. */
+	f->source_ref = obs_source_get_weak_source(context);
+	/* OBS may be serializing settings while the connection changes. Keep
+	 * live status in the filter and remove the saved value from old builds. */
+	obs_data_unset_user_value(settings, "status_text");
     atomic_init(&f->native_twitch_cc,false);
     atomic_init(&f->two_speakers,false);
     atomic_init(&f->audio_started,false);
@@ -802,6 +809,7 @@ static void st_destroy(void *data)
 		lws_cancel_service(f->lws_ctx);
 	st_connection_test_stop(f);
 	pthread_join(f->thread, NULL);
+	obs_weak_source_release(f->source_ref);
 	st_queue_clear(f);
 	pthread_cond_destroy(&f->test_ready);
 	pthread_mutex_destroy(&f->qlock);
@@ -860,9 +868,12 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
 	    out_frames > 0 && out[0]) {
 		/* A callback alone may be silence. Use the same PCM RMS floor as the
          * server, after conversion, to wake a no-audio admission pause. */
-        const int16_t *pcm=(const int16_t *)out[0];double energy=0;
-        for(uint32_t i=0;i<out_frames;i++) energy+=(double)pcm[i]*pcm[i];
-        if(sqrt(energy/out_frames)>=180){
+        const int16_t *pcm = (const int16_t *)out[0];
+        const size_t samples = (size_t)out_frames * (f->sending_stereo ? 2 : 1);
+        double energy = 0;
+        for (size_t i = 0; i < samples; i++)
+            energy += (double)pcm[i] * pcm[i];
+        if (sqrt(energy / samples) >= 180) {
             pthread_mutex_lock(&f->qlock);f->last_usable_audio_ns=os_gettime_ns();pthread_mutex_unlock(&f->qlock);
         }
         // Preserve the opening syllables while a same-capture transport wakes
@@ -875,7 +886,7 @@ static struct obs_audio_data *st_filter_audio(void *data, struct obs_audio_data 
             && now - f->last_usable_audio_ns <= ST_QUEUE_MAX_AGE_NS;
         pthread_mutex_unlock(&f->qlock);
         if (!capture_allowed || (!f->connected && !fresh_voice)) return audio;
-        st_queue_push(f, out[0], (size_t)out_frames * 2 /* s16 mono */);
+        st_queue_push(f, out[0], samples * sizeof(*pcm));
 		pthread_mutex_lock(&f->qlock);f->audio_chunks_captured++;pthread_mutex_unlock(&f->qlock);
 		if (f->lws_ctx)
 			lws_cancel_service(f->lws_ctx); /* wake ws thread to flush */
@@ -1037,7 +1048,14 @@ static obs_properties_t *st_get_properties(void *data)
     struct st_filter *f = data;
     obs_properties_t *props = obs_properties_create();
     st_update_properties(props, f);
-    obs_properties_add_text(props, "status_text", "", OBS_TEXT_INFO);
+    char status[sizeof(f->status)] = "Starting up…";
+    if (f) {
+        pthread_mutex_lock(&f->qlock);
+        if (f->status[0])
+            snprintf(status, sizeof(status), "%s", f->status);
+        pthread_mutex_unlock(&f->qlock);
+    }
+    obs_properties_add_text(props, "status_text", status, OBS_TEXT_INFO);
     obs_properties_add_text(props, "plugin_key", "Plugin key", OBS_TEXT_PASSWORD);
 #ifdef __APPLE__
     obs_properties_add_button2(props, "copy_plugin_key", "⧉ Copy Plugin Key", st_copy_plugin_key_clicked, f);
@@ -1069,11 +1087,6 @@ static obs_properties_t *st_get_properties(void *data)
 
     obs_data_t *settings = f ? obs_source_get_settings(f->context) : obs_data_create();
     st_migrate_setup(settings);
-    if (f) {
-        pthread_mutex_lock(&f->qlock);
-        obs_data_set_string(settings, "status_text", f->status[0] ? f->status : "Starting up…");
-        pthread_mutex_unlock(&f->qlock);
-    }
     st_setup_properties(props, NULL, settings);
     obs_data_release(settings);
     obs_properties_add_button2(props, "show_diagnostics",
@@ -1137,6 +1150,7 @@ static struct obs_source_info st_filter_info = {
 
 bool obs_module_load(void)
 {
+	st_resolve_ca_bundle_path();
 	st_updates_start();
 	obs_register_source(&st_filter_info);
 	blog(LOG_INFO, "[streamtranslate] plugin loaded");
