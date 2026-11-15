@@ -17,7 +17,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config libobs-dev libssl-dev
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DST_STATIC_LIBWEBSOCKETS=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DST_STATIC_LIBWEBSOCKETS=ON
       - name: Build
         run: cmake --build build --verbose
       - name: Verify no shared libwebsockets dependency
