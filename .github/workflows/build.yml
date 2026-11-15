@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -38,18 +38,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: brew install cmake pkg-config simde sevenzip
+        run: brew install cmake pkg-config simde
       - name: Fetch the Qt SDK for the compact OBS filter
         run: |
           qt_dir="$RUNNER_TEMP/streamtranslate-qt"
           mkdir -p "$qt_dir"
-          qt_archive=6.8.3-0-202503201723qtbase-MacOS-MacOS_14-Clang-MacOS-MacOS_14-X86_64-ARM64.7z
-          curl -fL --retry 3 "https://download.qt.io/online/qtsdkrepository/mac_x64/desktop/qt6_683/qt6_683/qt.qt6.683.clang_64/$qt_archive" -o "$qt_dir/qtbase.7z"
-          echo "c4dfc40f1be702eaa08e08cf87a749c44c55e5eb09e46a7933f18ab4b7ca7ac7  $qt_dir/qtbase.7z" | shasum -a 256 -c -
-          7zz x -y -o"$qt_dir" "$qt_dir/qtbase.7z"
-          qt_config=$(find "$qt_dir" -name Qt6Config.cmake -print -quit)
-          test -n "$qt_config"
-          printf 'ST_QT_CMAKE_DIR=%s\n' "$(dirname "$qt_config")" >> "$GITHUB_ENV"
+          qt_archive=macos-deps-qt6-2026-10-23-universal.tar.xz
+          curl -fL --retry 3 "https://github.com/obsproject/obs-deps/releases/download/2026-10-23/$qt_archive" -o "$qt_dir/$qt_archive"
+          echo "b216560cea8497207f9fc350c713716fb84aec6b973bb0ff8ac6add7734abad5  $qt_dir/$qt_archive" | shasum -a 256 -c -
+          tar -xf "$qt_dir/$qt_archive" -C "$qt_dir"
+          test -f "$qt_dir/lib/cmake/Qt6/Qt6Config.cmake"
+          printf 'ST_QT_CMAKE_DIR=%s\n' "$qt_dir/lib/cmake/Qt6" >> "$GITHUB_ENV"
       - name: Build pinned OpenSSL for macOS 14
         run: |
           mkdir -p build-deps
