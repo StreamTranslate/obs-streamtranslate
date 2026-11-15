@@ -456,6 +456,13 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         if(len>=2){const unsigned char *p=in;unsigned code=(p[0]<<8)|p[1]; f->last_close_code=code;
             blog(LOG_INFO,"[streamtranslate] Server close code: %u",code);
             char reason[160]={0};size_t reason_len=len-2<sizeof(reason)-1?len-2:sizeof(reason)-1;memcpy(reason,p+2,reason_len);
+            /* Control Stop has the same pause semantics as this filter's Stop button. */
+            if (code == 4001 && !strcmp(reason, "stopped_by_owner")) {
+                pthread_mutex_lock(&f->qlock);
+                f->user_paused = true;
+                pthread_mutex_unlock(&f->qlock);
+                break;
+            }
             bool primary_pending=f->speaker==1 && code==4409 && !strcmp(reason,"Streamer is not live");
             f->waiting_primary=primary_pending;
             if(primary_pending) st_set_status(f,"%s",st_setup_close_message(reason));

@@ -12,15 +12,33 @@ int main(void){
  struct obs_source_info src={.id="qa_audio",.type=OBS_SOURCE_TYPE_INPUT,.output_flags=OBS_SOURCE_AUDIO,.get_name=name};obs_register_source(&src);
  obs_source_t *source=obs_source_create_private("qa_audio","QA recovery",NULL);assert(source);
  obs_data_t *settings=obs_data_create();obs_data_set_string(settings,"server","127.0.0.1");obs_data_set_string(settings,"plugin_key","local-test-only");obs_data_set_int(settings,"mic_mode",1);
- struct st_filter *f=st_create(settings,source);float left[480],right[480];double phase=0;uint64_t start=os_gettime_ns();int step=0;
- for(;;){double age=(os_gettime_ns()-start)/1e9;if(age>18)break;
+ struct st_filter *f=st_create(settings,source);float left[480],right[480];double phase=0;uint64_t start=os_gettime_ns();int step=0, sent_at_stop=0;
+ for(;;){double age=(os_gettime_ns()-start)/1e9;if(age>30)break;
   if(age>4&&step==0){assert(!f->terminal_paused&&f->reconnects==2&&f->connected);obs_data_set_int(settings,"mic_mode",2);st_update(f,settings);step++;}
   if(age>8&&step==1){assert(f->connected&&f->sending_stereo);st_reconnect_clicked(NULL,NULL,f);step++;}
-  if(age>11&&step==2){assert(f->connected&&f->reconnects==4);obs_data_set_int(settings,"mic_mode",0);st_update(f,settings);step++;}
+  if(age>12&&step==2){
+   assert(!f->connected&&st_user_paused(f)&&!f->conflict_paused&&f->sending_stereo&&f->reconnects==4);
+   assert(strstr(f->status,"Paused - not sending audio"));
+   sent_at_stop=f->audio_chunks_sent;
+   obs_data_set_int(settings,"mic_mode",0);st_update(f,settings);step++;
+  }
+  if(age>16&&step==3){
+   assert(!f->connected&&st_user_paused(f)&&f->reconnects==4&&f->audio_chunks_sent==sent_at_stop);
+   st_audio_toggle_clicked(NULL,NULL,f);step++;
+  }
+  if(age>23&&step==4){
+   assert(f->connected&&!f->sending_stereo&&f->reconnects==6);
+   obs_data_set_int(settings,"mic_mode",2);st_update(f,settings);step++;
+  }
+  if(age>27&&step==5){
+   assert(!f->connected&&!st_user_paused(f)&&f->conflict_paused&&f->reconnects==7);
+   assert(strstr(f->status,"Another filter already sends this mic"));
+   st_audio_toggle_clicked(NULL,NULL,f);step++;
+  }
   for(int i=0;i<480;i++){left[i]=0.2f*sin(phase);right[i]=0.3f*cos(phase);phase+=2*3.141592653589793*440/48000;}
   struct obs_audio_data a={.data={(uint8_t*)left,(uint8_t*)right},.frames=480,.timestamp=os_gettime_ns()};st_filter_audio(f,&a);os_sleep_ms(10);
  }
- assert(f->connected&&!f->sending_stereo&&f->reconnects==6&&!f->terminal_paused);
+ assert(f->connected&&f->sending_stereo&&f->reconnects==8&&!st_user_paused(f)&&!f->terminal_paused);
  obs_source_set_enabled(source,false);
  struct obs_audio_data muted={.data={(uint8_t*)left,(uint8_t*)right},.frames=480,.timestamp=os_gettime_ns()};
  st_filter_audio(f,&muted);assert(!f->audio_started && strstr(f->status,"Muted in OBS"));
@@ -28,5 +46,5 @@ int main(void){
  for(int i=0;i<50;i++){st_filter_audio(f,&muted);os_sleep_ms(10);}
  assert(f->audio_started && (strstr(f->status,"Connected")||strstr(f->status,"packets")));st_destroy(f);
  obs_data_set_int(settings,"mic_mode",2);obs_data_set_string(settings,"plugin_key","");f=st_create(settings,source);assert(f->sending_stereo&&!f->resampler_dirty);st_destroy(f);
- obs_source_release(source);obs_data_release(settings);obs_shutdown();puts("PASS missing-primary automatic recovery, mode recovery, stereo reconnect, automatic server-requested recovery and channel selection before first callback");
+ obs_source_release(source);obs_data_release(settings);obs_shutdown();puts("PASS missing-primary automatic recovery, mode recovery, stereo reconnect, automatic recovery, owner Stop, separate filter conflict, and channel selection");
 }
