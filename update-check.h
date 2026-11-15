@@ -7,7 +7,6 @@
 #define ST_RELEASES_URL "https://github.com/StreamTranslate/obs-streamtranslate/releases/latest"
 #define ST_UPDATE_BODY_MAX (128 * 1024)
 #define ST_UPDATE_COOLDOWN_NS (900ULL * 1000000000ULL)
-#define ST_UPDATE_TIMEOUT_NS (8ULL * 1000000000ULL)
 
 enum st_update_result { ST_UPDATE_UNCHECKED, ST_UPDATE_CHECKING,
                         ST_UPDATE_CURRENT, ST_UPDATE_AVAILABLE, ST_UPDATE_FAILED };
@@ -21,7 +20,45 @@ static struct {
     char latest[32];
 } st_updates = { .lock = PTHREAD_MUTEX_INITIALIZER, .ready = PTHREAD_COND_INITIALIZER };
 
-#include "update-process.h"
+static bool st_updates_stopping(void)
+{
+    pthread_mutex_lock(&st_updates.lock);
+    bool stop = st_updates.stop;
+    pthread_mutex_unlock(&st_updates.lock);
+    return stop;
+}
+
+static const char *st_update_api_url(void)
+{
+#ifdef ST_UPDATE_TEST_MODE
+    extern const char *st_update_test_url;
+    if (st_update_test_url) return st_update_test_url;
+#endif
+    return "https://api.github.com/repos/StreamTranslate/obs-streamtranslate/releases/latest";
+}
+
+static const char *st_update_allowed_protocol(void)
+{
+#ifdef ST_UPDATE_TEST_MODE
+    extern const char *st_update_test_url;
+    if (st_update_test_url) return "http";
+#endif
+    return "https";
+}
+
+static bool st_update_capture_stopping(void *unused)
+{
+    (void)unused;
+    return st_updates_stopping();
+}
+
+static bool st_update_capture(char *body, size_t capacity, size_t *used)
+{
+    return st_https_capture(st_update_api_url(), st_update_allowed_protocol(),
+        "StreamTranslate-OBS-update-check", st_update_capture_stopping, NULL,
+        body, capacity, used);
+}
+
 
 static enum st_update_result st_update_parse(const char *body, char latest[32])
 {

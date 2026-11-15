@@ -1,9 +1,11 @@
-/* Keep optional update-network work outside OBS's address space. Even a stuck
+/* Keep HTTPS probes outside OBS's address space. Even a stuck
  * system DNS resolver is cancellable by terminating this credential-free child.
  * No shell, user URL, shell expansion, curlrc or install command is involved. */
 #ifndef ST_UPDATE_PROCESS_H
 #define ST_UPDATE_PROCESS_H
 #include <wchar.h>
+
+#define ST_HTTPS_TIMEOUT_NS (8ULL * 1000000000ULL)
 
 #ifndef _WIN32
 #include <spawn.h>
@@ -13,32 +15,6 @@
 #include <errno.h>
 extern char **environ;
 #endif
-
-static bool st_updates_stopping(void)
-{
-    pthread_mutex_lock(&st_updates.lock);
-    bool stop = st_updates.stop;
-    pthread_mutex_unlock(&st_updates.lock);
-    return stop;
-}
-
-static const char *st_update_api_url(void)
-{
-#ifdef ST_UPDATE_TEST_MODE
-    extern const char *st_update_test_url;
-    if (st_update_test_url) return st_update_test_url;
-#endif
-    return "https://api.github.com/repos/StreamTranslate/obs-streamtranslate/releases/latest";
-}
-
-static const char *st_update_allowed_protocol(void)
-{
-#ifdef ST_UPDATE_TEST_MODE
-    extern const char *st_update_test_url;
-    if (st_update_test_url) return "http";
-#endif
-    return "https";
-}
 
 static bool st_https_capture(const char *request_url, const char *allowed_protocol,
                              const char *user_agent, bool (*stopping)(void *), void *opaque,
@@ -93,7 +69,7 @@ static bool st_https_capture(const char *request_url, const char *allowed_protoc
     CloseHandle(write_pipe);
     if (!created) { CloseHandle(read_pipe); return false; }
     bool exited = false, overflow = false;
-    while (!stopping(opaque) && os_gettime_ns() - start < ST_UPDATE_TIMEOUT_NS) {
+    while (!stopping(opaque) && os_gettime_ns() - start < ST_HTTPS_TIMEOUT_NS) {
         DWORD available = 0, count = 0;
         if (PeekNamedPipe(read_pipe, NULL, 0, NULL, &available, NULL) && available) {
             if (*used == capacity) { overflow = true; break; }
@@ -165,7 +141,7 @@ static bool st_https_capture(const char *request_url, const char *allowed_protoc
     if (error) { close(pipes[0]); return false; }
     int status = 0;
     bool exited = false, eof = false, overflow = false;
-    while (!stopping(opaque) && os_gettime_ns() - start < ST_UPDATE_TIMEOUT_NS) {
+    while (!stopping(opaque) && os_gettime_ns() - start < ST_HTTPS_TIMEOUT_NS) {
         char buffer[4096];
         ssize_t count = read(pipes[0], buffer, sizeof(buffer));
         if (count > 0) {
@@ -186,17 +162,5 @@ static bool st_https_capture(const char *request_url, const char *allowed_protoc
 #endif
     body[*used] = 0;
     return ok;
-}
-static bool st_update_capture_stopping(void *unused)
-{
-    (void)unused;
-    return st_updates_stopping();
-}
-
-static bool st_update_capture(char *body, size_t capacity, size_t *used)
-{
-    return st_https_capture(st_update_api_url(), st_update_allowed_protocol(),
-        "StreamTranslate-OBS-update-check", st_update_capture_stopping, NULL,
-        body, capacity, used);
 }
 #endif

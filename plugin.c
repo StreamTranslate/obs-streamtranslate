@@ -469,7 +469,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             bool changed=code==4409 && (!strcmp(reason,"Stream control changed; reconnect") || !strcmp(reason,"Streamer input changed; reconnect"));
             if(st_close_policy(code)==ST_RETRY_MANUAL && code!=4001 && code!=4009 && !changed && !primary_pending){
                 pthread_mutex_lock(&f->qlock);f->terminal_paused=true;pthread_mutex_unlock(&f->qlock);
-                st_set_status(f,code==4008 ? "Stopped after idle timeout. Press Start sending audio to start again." :
+                st_set_status(f,code==4008 ? "Stopped after idle timeout. Press Start audio to start again." :
                     code==4409 ? st_setup_close_message(reason) :
                     code==4403 ? "Plugin key rejected. Update your Plugin Key, then press Reconnect." :
                     "Session stopped by server. Check your account, then press Reconnect.");
@@ -486,7 +486,7 @@ static int st_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         f->stop_phase = 0; f->stop_deadline_ns = 0;
         pthread_mutex_unlock(&f->qlock);
         st_queue_clear(f);
-		if (st_user_paused(f)) st_set_status(f, "Paused - not sending audio. Press Start sending audio to resume.");
+		if (st_user_paused(f)) st_set_status(f, "Paused - not sending audio. Press Start audio to resume.");
         else if(!f->conflict_paused && !f->terminal_paused && !f->waiting_audio && !f->waiting_primary) st_set_status(f, "Disconnected from %s - reconnecting", f->server);
 		f->connected = false;
 		f->wsi = NULL;
@@ -508,7 +508,7 @@ static void st_connect(struct st_filter *f)
 	if (!f->lws_ctx || f->wsi)
 		return;
 	if (!f->plugin_key[0]) {
-		st_set_status(f, "Not configured - paste your Plugin Key above");
+		st_set_status(f, "Paste your plugin key to connect.");
 		return;
 	}
 
@@ -608,7 +608,14 @@ static void st_resolve_ca_bundle_path(void)
 		blog(LOG_WARNING, "[streamtranslate] no CA bundle found — TLS verification may fail");
 }
 
+#include "update-process.h"
+
+#ifdef ST_OBS_COMPACT_UI
+void st_compact_ui_start(void);
+void st_compact_ui_stop(void);
+#else
 #include "update-check.h"
+#endif
 #include "connection-test.h"
 
 static void st_service_pulse(lws_sorted_usec_list_t *sul)
@@ -917,7 +924,7 @@ static bool st_stop_clicked(obs_properties_t *props, obs_property_t *prop, void 
     }
     pthread_mutex_unlock(&f->qlock);
     st_queue_clear(f);
-    st_set_status(f, "Paused - not sending audio. Press Start sending audio to resume.");
+    st_set_status(f, "Paused - not sending audio. Press Start audio to resume.");
 	if (f->lws_ctx)
 		lws_cancel_service(f->lws_ctx);
 	return false;
@@ -952,7 +959,7 @@ static bool st_reconnect_clicked(obs_properties_t *props, obs_property_t *prop, 
 	return false;
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(ST_OBS_COMPACT_UI)
 bool st_copy_plugin_key_to_clipboard(const char *key);
 
 static bool st_copy_plugin_key_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
@@ -993,8 +1000,9 @@ static bool st_setup_properties(obs_properties_t *props, obs_property_t *propert
     obs_property_set_description(obs_properties_get(props, "native_help"), two ?
         "Native Twitch CC requires 1 speaker. Use a browser overlay for 2 speakers." :
         "Optional Twitch CC button. Set language in Control. Change before streaming.");
-    obs_property_set_description(obs_properties_get(props, "audio_help"), !two ?
-        "Languages and caption output: choose them at streamtranslate.live." : separate ?
+    obs_property_t *wiring_help = obs_properties_get(props, "wiring_help");
+    obs_property_set_visible(wiring_help, two);
+    obs_property_set_description(wiring_help, separate ?
         "Add this filter to each OBS source. Assign Mic 1 to one and Mic 2 to the other." :
         "Receiver in stereo: left = Mic 1, right = Mic 2. Enable Two speakers at streamtranslate.live.");
     return true;
@@ -1021,15 +1029,6 @@ static bool st_audio_toggle_clicked(obs_properties_t *props, obs_property_t *pro
     return paused ? st_reconnect_clicked(props, prop, data) : st_stop_clicked(props, prop, data);
 }
 
-static bool st_diagnostics_clicked(obs_properties_t *props, obs_property_t *prop, void *data)
-{
-    (void)props; (void)prop;
-    struct st_filter *f = data;
-    if (!f) return false;
-    f->show_diagnostics = !f->show_diagnostics;
-    return true;
-}
-
 static void st_diagnostic_text(struct st_filter *f, char *out, size_t size)
 {
     uint64_t now = os_gettime_ns();
@@ -1040,8 +1039,8 @@ static void st_diagnostic_text(struct st_filter *f, char *out, size_t size)
       "Last server close code: %u\n\n"
       "If account access is blocked, copy the current plugin key from Control and check your plan.\n"
       "If no audio is delivered, check that the source and filter are enabled and the source is not muted.\n"
-      "Start sending audio resumes this filter. Pause sending audio pauses this filter only.\n"
-      "Test connection checks server reachability only; it never starts or interrupts audio.\n"
+      "Start or pause audio for this filter with the audio button.\n"
+      "Test server checks whether the server is reachable.\n"
       "For support, use Help > Log Files > View Current Log in OBS. Do not share your plugin key.",
       ST_RELEASE_VERSION,obs_get_version_string(),f->connected?"Connected":f->terminal_paused?"Blocked by server":f->user_paused?"Paused":f->waiting_audio?"Waiting for audio":f->conflict_paused?"Another source active":"Connecting / disconnected",
       f->audio_chunks_captured,f->audio_chunks_sent,
@@ -1050,11 +1049,34 @@ static void st_diagnostic_text(struct st_filter *f, char *out, size_t size)
     pthread_mutex_unlock(&f->qlock);
 }
 
+static void st_update_diagnostics(obs_property_t *details, struct st_filter *filter)
+{
+    bool expanded = filter && filter->show_diagnostics;
+    obs_property_set_visible(details, expanded);
+    if (expanded) {
+        char text[1600];
+        st_diagnostic_text(filter, text, sizeof(text));
+        obs_property_set_description(details, text);
+    }
+}
+
+static bool st_diagnostics_clicked(obs_properties_t *props, obs_property_t *button, void *data)
+{
+    struct st_filter *filter = data;
+    if (!filter) return false;
+    filter->show_diagnostics = !filter->show_diagnostics;
+    obs_property_set_description(button, filter->show_diagnostics ? "Hide diagnostics" : "Diagnostics");
+    st_update_diagnostics(obs_properties_get(props, "diagnostics_details"), filter);
+    return true;
+}
+
 static obs_properties_t *st_get_properties(void *data)
 {
     struct st_filter *f = data;
     obs_properties_t *props = obs_properties_create();
+#ifndef ST_OBS_COMPACT_UI
     st_update_properties(props, f);
+#endif
     char status[sizeof(f->status)] = "Starting up…";
     if (f) {
         pthread_mutex_lock(&f->qlock);
@@ -1063,9 +1085,10 @@ static obs_properties_t *st_get_properties(void *data)
         pthread_mutex_unlock(&f->qlock);
     }
     obs_properties_add_text(props, "status_text", status, OBS_TEXT_INFO);
-    obs_properties_add_text(props, "plugin_key", "Plugin key", OBS_TEXT_PASSWORD);
-#ifdef __APPLE__
-    obs_properties_add_button2(props, "copy_plugin_key", "⧉ Copy Plugin Key", st_copy_plugin_key_clicked, f);
+    obs_property_t *key = obs_properties_add_text(props, "plugin_key", "Plugin key", OBS_TEXT_PASSWORD);
+    obs_property_set_long_description(key, "Paste your StreamTranslate plugin key.");
+#if defined(__APPLE__) && !defined(ST_OBS_COMPACT_UI)
+    obs_properties_add_button2(props, "copy_plugin_key", "Copy plugin key", st_copy_plugin_key_clicked, f);
 #endif
     obs_property_t *count = obs_properties_add_list(props, "speaker_count", "Speakers",
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -1083,7 +1106,8 @@ static obs_properties_t *st_get_properties(void *data)
     obs_property_set_modified_callback(wiring, st_setup_properties);
     obs_property_set_modified_callback(role, st_setup_properties);
     obs_properties_add_text(props, "audio_help",
-        "Languages and caption output: choose them at streamtranslate.live.", OBS_TEXT_INFO);
+        "Choose your language and caption output at streamtranslate.live.", OBS_TEXT_INFO);
+    obs_properties_add_text(props, "wiring_help", "", OBS_TEXT_INFO);
 
     obs_properties_t *advanced = obs_properties_create();
     obs_properties_add_text(advanced, "server", "Server", OBS_TEXT_DEFAULT);
@@ -1097,19 +1121,11 @@ static obs_properties_t *st_get_properties(void *data)
     st_setup_properties(props, NULL, settings);
     obs_data_release(settings);
     obs_properties_add_button2(props, "show_diagnostics",
-        f && f->show_diagnostics ? "Hide diagnostics / help" : "Show diagnostics / help",
+        f && f->show_diagnostics ? "Hide diagnostics" : "Diagnostics",
         st_diagnostics_clicked, f);
-    obs_property_t *diagnostics = obs_properties_add_text(props, "diagnostics_text", "Diagnostics", OBS_TEXT_INFO);
-    obs_property_set_visible(diagnostics, f && f->show_diagnostics);
-    if (f) {
-        char diagnostic[1600]; st_diagnostic_text(f, diagnostic, sizeof(diagnostic));
-        obs_data_t *settings = obs_source_get_settings(f->context);
-        obs_data_set_string(settings,"diagnostics_text",diagnostic);
-        obs_data_release(settings);
-    }
 
     bool paused = false;
-    char test_result[320] = "Not tested. Checks server reachability without changing audio.";
+    char test_result[320] = "";
     bool testing = false;
     if (f) {
         pthread_mutex_lock(&f->qlock);
@@ -1119,17 +1135,16 @@ static obs_properties_t *st_get_properties(void *data)
         pthread_mutex_unlock(&f->qlock);
     }
     obs_properties_add_button2(props, "stop_stream",
-        paused ? "Start sending audio" : "Pause sending audio", st_audio_toggle_clicked, f);
-    obs_property_t *test = obs_properties_add_button2(props, "test_connection", "Test connection",
+        paused ? "Start audio" : "Pause audio", st_audio_toggle_clicked, f);
+    obs_property_t *test = obs_properties_add_button2(props, "test_connection", "Test server",
         st_test_connection_clicked, f);
     obs_property_set_enabled(test, f && !testing);
-    obs_property_set_long_description(test, "Read-only HTTPS health check. Does not resume audio, reconnect the audio socket, or validate your plugin key.");
-    obs_properties_add_text(props, "connection_test_text", "Connection test", OBS_TEXT_INFO);
-    if (f) {
-        obs_data_t *settings = obs_source_get_settings(f->context);
-        obs_data_set_string(settings, "connection_test_text", test_result);
-        obs_data_release(settings);
-    }
+    obs_property_set_long_description(test, "Checks whether your server is reachable.");
+
+    if (test_result[0])
+        obs_properties_add_text(props, "connection_test_result", test_result, OBS_TEXT_INFO);
+    obs_property_t *details = obs_properties_add_text(props, "diagnostics_details", "", OBS_TEXT_INFO);
+    st_update_diagnostics(details, f);
     return props;
 }
 
@@ -1158,7 +1173,11 @@ static struct obs_source_info st_filter_info = {
 bool obs_module_load(void)
 {
 	st_resolve_ca_bundle_path();
-	st_updates_start();
+#ifdef ST_OBS_COMPACT_UI
+    st_compact_ui_start();
+#else
+    st_updates_start();
+#endif
 	obs_register_source(&st_filter_info);
 	blog(LOG_INFO, "[streamtranslate] plugin loaded");
 	return true;
@@ -1166,5 +1185,9 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+#ifdef ST_OBS_COMPACT_UI
+    st_compact_ui_stop();
+#else
     st_updates_stop();
+#endif
 }

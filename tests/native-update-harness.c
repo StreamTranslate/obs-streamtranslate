@@ -87,7 +87,7 @@ int main(int argc, char **argv)
         pthread_mutex_lock(&st_updates.lock);
         completed = st_updates.result;
         pthread_mutex_unlock(&st_updates.lock);
-    } while (completed == ST_UPDATE_CHECKING && os_gettime_ns() - wait_start < ST_UPDATE_TIMEOUT_NS);
+    } while (completed == ST_UPDATE_CHECKING && os_gettime_ns() - wait_start < ST_HTTPS_TIMEOUT_NS);
     assert(completed == ST_UPDATE_AVAILABLE);
     uint64_t previous_request = st_updates.requested_ns;
     st_check_updates_clicked(NULL, NULL, NULL);

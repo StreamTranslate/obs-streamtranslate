@@ -11,19 +11,31 @@ static void refreshed(void *unused,calldata_t *data){(void)unused;(void)data;ass
 static const char *source_name(void *x){(void)x;return "Diagnostic test source";}
 static void *source_create(obs_data_t *s,obs_source_t *c){(void)s;return c;}
 static void source_destroy(void *data){(void)data;}
-static void *network_status(void *data){struct st_filter *f=data;f->connected=true;st_set_status(f,"Connected to streamtranslate.live - streaming audio");return NULL;}
+static void *network_status(void *data){struct st_filter *f=data;f->connected=true;st_set_status(f,"Connected to streamtranslate.live - streaming audio");st_publish_status(f);return NULL;}
 int main(void){
  assert(obs_startup("en-US",NULL,NULL));struct obs_audio_info ai={.samples_per_sec=48000,.speakers=SPEAKERS_STEREO};assert(obs_reset_audio(&ai));ui_thread=pthread_self();obs_set_ui_task_handler(enqueue_ui);pump_ui();
  struct obs_source_info info={.id="diagnostic_test_source",.type=OBS_SOURCE_TYPE_INPUT,.output_flags=OBS_SOURCE_AUDIO,.get_name=source_name,.create=source_create,.destroy=source_destroy};obs_register_source(&info);
  obs_source_t *source=obs_source_create_private(info.id,"Diagnostics",NULL);assert(source);
  signal_handler_connect(obs_source_get_signal_handler(source),"update_properties",refreshed,NULL);
- struct st_filter f={0};f.context=source;pthread_mutex_init(&f.qlock,NULL);snprintf(f.plugin_key,sizeof(f.plugin_key),"SECRET-MUST-NOT-APPEAR");
+ struct st_filter f={0};f.context=source;f.source_ref=obs_source_get_weak_source(source);pthread_mutex_init(&f.qlock,NULL);snprintf(f.plugin_key,sizeof(f.plugin_key),"SECRET-MUST-NOT-APPEAR");
  pthread_t network;pthread_create(&network,NULL,network_status,&f);pthread_join(network,NULL);
  assert(refreshes==0 && queued_task);pump_ui();assert(refreshes==1);
- obs_properties_t *props=st_get_properties(&f);assert(!obs_property_visible(obs_properties_get(props,"diagnostics_text")));obs_properties_destroy(props);
- assert(st_diagnostics_clicked(NULL,NULL,&f));props=st_get_properties(&f);assert(obs_property_visible(obs_properties_get(props,"diagnostics_text")));
- obs_data_t *settings=obs_source_get_settings(source);const char *status=obs_data_get_string(settings,"status_text");const char *diagnostic=obs_data_get_string(settings,"diagnostics_text");assert(strstr(status,"Connected to"));assert(strstr(diagnostic,"Connection: Connected"));assert(!strstr(diagnostic,f.plugin_key));obs_data_release(settings);obs_properties_destroy(props);
+ obs_properties_t *props=st_get_properties(&f);
+ obs_property_t *diagnostics=obs_properties_get(props,"diagnostics_details");
+ obs_property_t *button=obs_properties_get(props,"show_diagnostics");
+ assert(diagnostics && !obs_property_visible(diagnostics));
+ /* OBS redraws this same properties object after clicking a button. */
+ assert(obs_property_button_clicked(button,source));
+ assert(obs_property_visible(diagnostics));
+ assert(!strcmp(obs_property_description(button),"Hide diagnostics"));
+ const char *status=obs_property_description(obs_properties_get(props,"status_text"));
+ const char *diagnostic=obs_property_description(diagnostics);
+ assert(strstr(status,"Connected to"));
+ assert(strstr(diagnostic,"Connection: Connected"));
+ assert(!strstr(diagnostic,f.plugin_key));
+ assert(obs_property_button_clicked(button,source));
+ assert(!obs_property_visible(diagnostics) && !f.show_diagnostics);
+ obs_properties_destroy(props);
  f.connected=false;f.terminal_paused=true;f.last_close_code=4003;char text[1600];st_diagnostic_text(&f,text,sizeof(text));assert(strstr(text,"Blocked by server") && strstr(text,"4003"));assert(strstr(st_close_message(4003),"Account access blocked"));assert(strstr(st_close_message(4402),"hours exhausted"));
- assert(st_diagnostics_clicked(NULL,NULL,&f) && !f.show_diagnostics);
- obs_source_release(source);pthread_mutex_destroy(&f.qlock);obs_shutdown();puts("PASS deferred UI refresh, visible diagnostics, rejection explanation, secret redaction, toggle");return 0;
+ obs_source_release(source);obs_weak_source_release(f.source_ref);pthread_mutex_destroy(&f.qlock);obs_shutdown();puts("PASS deferred UI refresh, visible diagnostics, rejection explanation, secret redaction, toggle");return 0;
 }
