@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -17,7 +17,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config libobs-dev libssl-dev
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DST_STATIC_LIBWEBSOCKETS=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DST_STATIC_LIBWEBSOCKETS=ON
       - name: Build
         run: cmake --build build --verbose
       - name: Verify no shared libwebsockets dependency
@@ -39,6 +39,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: brew install cmake pkg-config simde
+      - name: Fetch the Qt SDK for the compact OBS filter
+        run: |
+          qt_dir="$RUNNER_TEMP/streamtranslate-qt"
+          mkdir -p "$qt_dir"
+          qt_archive=macos-deps-qt6-2026-10-23-universal.tar.xz
+          curl -fL --retry 3 "https://github.com/obsproject/obs-deps/releases/download/2026-10-23/$qt_archive" -o "$qt_dir/$qt_archive"
+          echo "b216560cea8497207f9fc350c713716fb84aec6b973bb0ff8ac6add7734abad5  $qt_dir/$qt_archive" | shasum -a 256 -c -
+          tar -xf "$qt_dir/$qt_archive" -C "$qt_dir"
+          test -f "$qt_dir/lib/cmake/Qt6/Qt6Config.cmake"
+          printf 'ST_QT_CMAKE_DIR=%s\n' "$qt_dir/lib/cmake/Qt6" >> "$GITHUB_ENV"
       - name: Build pinned OpenSSL for macOS 14
         run: |
           mkdir -p build-deps
@@ -70,6 +80,7 @@ jobs:
           HDR
           cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DST_OBS_COMPACT_UI=ON -DQt6_DIR="$ST_QT_CMAKE_DIR" -DCMAKE_SKIP_RPATH=ON \
             -DST_MACOS_OBS_HEADERS="$PWD/obs-studio/libobs" -DST_MACOS_OBS_CONFIG="$PWD/genhdr" \
             -DST_MACOS_SIMDE_INCLUDE="$(brew --prefix simde)/include" \
             -DLWS_OPENSSL_INCLUDE_DIRS="$RUNNER_TEMP/streamtranslate-openssl/include" \
@@ -85,7 +96,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>live.streamtranslate.obs-plugin</string>
             <key>CFBundleExecutable</key><string>obs-streamtranslate</string>
             <key>CFBundlePackageType</key><string>BNDL</string>
-            <key>CFBundleVersion</key><string>0.1.15</string>
+            <key>CFBundleVersion</key><string>0.1.16</string>
           </dict>
           </plist>
           PLIST
@@ -102,7 +113,7 @@ jobs:
           test "$(lipo -archs "$BIN")" = arm64
           test "$(xcrun vtool -show-build "$BIN" | awk '/minos/{print $2}')" = 14.0
           otool -L "$BIN"
-          otool -L "$BIN" | awk 'NR > 1 && $1 !~ /^\/(usr\/lib|System\/Library\/Frameworks)\// {exit 1}'
+          otool -L "$BIN" | awk 'NR > 1 && $1 !~ /^\/(usr\/lib|System\/Library\/Frameworks)\// && $1 !~ /^@rpath\/Qt(Core|Gui|Widgets)\.framework\/Versions\/A\/Qt(Core|Gui|Widgets)$/ {exit 1}'
           codesign --force --sign - "$bundle"
           codesign --verify --strict "$bundle"
       - name: Build branded .pkg installer
@@ -128,7 +139,7 @@ jobs:
           chmod +x pkg-scripts/postinstall
           pkgbuild --root pkgroot \
             --identifier live.streamtranslate.obs-plugin \
-            --version 0.1.15 \
+            --version 0.1.16 \
             --scripts pkg-scripts \
             --install-location "/" \
             component.pkg

@@ -89,7 +89,7 @@ Reliability release keeps public single-speaker mode. Teardown no longer calls u
 `native-controls-harness.c` uses real libobs properties plus a loopback-only
 HTTP health fixture (`python3 tests/connection-server.py`, port8798). Build with
 `ST_CONNECTION_TEST_MODE` supplied by the harness only. It checks morphing
-Pause/Start labels and intent, one-second counter snapshots, probes while active
+Pause/Start labels and intent, probes while active
 and paused without changing capture identity/audio state, malformed health JSON,
 redirect/error/oversize rejection, host validation, and bounded cancellation.
 The fixture rejects credentials. A successful health probe is **not** proof of
