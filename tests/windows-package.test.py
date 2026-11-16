@@ -35,6 +35,16 @@ class WindowsPackageTests(unittest.TestCase):
             self.assertEqual(archive.read('LICENSE-libcaption.txt'), (ROOT / 'LICENSE-libcaption.txt').read_bytes())
             self.assertFalse(any(name.startswith('obs-plugins/') for name in archive.namelist()))
 
+    def test_updater_is_available_alongside_both_dedicated_dlls(self):
+        updater = self.root / 'obs-streamtranslate-updater.exe'
+        updater.write_bytes(b'MZ-test-updater')
+        modern, legacy = module.package_windows(self.dll, self.ca, self.output, updater)
+        with ZipFile(modern) as archive:
+            for prefix in ('obs-streamtranslate/', 'obs-streamtranslate/bin/64bit/'):
+                self.assertEqual(archive.read(prefix + updater.name), updater.read_bytes())
+        with ZipFile(legacy) as archive:
+            self.assertFalse(any(name.endswith(updater.name) for name in archive.namelist()))
+
     def test_older_portable_package_retains_existing_layout(self):
         _, legacy = self.package()
         with ZipFile(legacy) as archive:

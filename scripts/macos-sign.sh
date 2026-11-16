@@ -16,6 +16,10 @@ for lib in "$bundle"/Contents/Frameworks/*.dylib; do
   [[ -f "$lib" ]] || continue
   codesign --force --timestamp --options runtime --sign "$MACOS_APPLICATION_IDENTITY" ${keychain_args[@]+"${keychain_args[@]}"} "$lib"
 done
+helper="$bundle/Contents/MacOS/obs-streamtranslate-updater"
+if [[ -f "$helper" ]]; then
+  codesign --force --timestamp --options runtime --sign "$MACOS_APPLICATION_IDENTITY" ${keychain_args[@]+"${keychain_args[@]}"} "$helper"
+fi
 xattr -d com.apple.FinderInfo "$bundle" 2>/dev/null || true
 xattr -d com.apple.ResourceFork "$bundle" 2>/dev/null || true
 codesign --force --timestamp --options runtime --sign "$MACOS_APPLICATION_IDENTITY" ${keychain_args[@]+"${keychain_args[@]}"} "$bundle"

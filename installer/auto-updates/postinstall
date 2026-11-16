@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+account=$(/usr/bin/stat -f %Su /dev/console)
+[[ -n "$account" && "$account" != root && "$account" != loginwindow ]]
+user_home=$(/usr/bin/dscl . -read "/Users/$account" NFSHomeDirectory)
+user_home=${user_home#NFSHomeDirectory: }
+[[ "$user_home" = /* && -d "$user_home" ]]
+settings="$user_home/Library/Application Support/obs-studio/plugin_config/obs-streamtranslate"
+# Write the same preference OBS uses, with the user's permissions.
+exec /usr/bin/sudo -u "$account" /bin/bash -c '
+    set -e
+    umask 077
+    /bin/mkdir -p "$1"
+    /usr/bin/touch "$1/auto-updates.enabled"
+' -- "$settings"

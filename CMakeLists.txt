@@ -78,4 +78,9 @@ elseif(APPLE)
   target_link_libraries(obs-streamtranslate PRIVATE "-framework AppKit")
 endif()
 
+option(ST_DESKTOP_UPDATER "Enable the optional per-install desktop updater" OFF)
+if(ST_DESKTOP_UPDATER AND APPLE)
+  target_compile_definitions(obs-streamtranslate PRIVATE ST_DESKTOP_UPDATER)
+endif()
+
 set_target_properties(obs-streamtranslate PROPERTIES PREFIX "")

@@ -35,8 +35,16 @@ jobs:
 
   build-macos:
     runs-on: macos-26
+    env:
+      ST_UPDATE_PUBLIC_KEY: ${{ vars.ST_UPDATE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: updater/go.sum
+      - name: Test the desktop updater
+        run: go -C updater test ./...
       - name: Install dependencies
         run: brew install cmake pkg-config simde
       - name: Fetch the Qt SDK for the compact OBS filter
@@ -78,8 +86,13 @@ jobs:
           #define OBS_RELEASE_CANDIDATE 0
           #define OBS_BETA 0
           HDR
+          if [ -n "$ST_UPDATE_PUBLIC_KEY" ]; then
+            printf '%s\n' "$ST_UPDATE_PUBLIC_KEY" | grep -Eq '^[A-Za-z0-9+/]{43}=$'
+            CGO_ENABLED=0 go -C updater build -trimpath -ldflags="-X main.publicKey=$ST_UPDATE_PUBLIC_KEY" \
+              -o "$PWD/dist/obs-streamtranslate.plugin/Contents/MacOS/obs-streamtranslate-updater" .
+          fi
           cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DST_DESKTOP_UPDATER=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DST_OBS_COMPACT_UI=ON -DQt6_DIR="$ST_QT_CMAKE_DIR" -DCMAKE_SKIP_RPATH=ON \
             -DST_MACOS_OBS_HEADERS="$PWD/obs-studio/libobs" -DST_MACOS_OBS_CONFIG="$PWD/genhdr" \
             -DST_MACOS_SIMDE_INCLUDE="$(brew --prefix simde)/include" \
@@ -114,6 +127,9 @@ jobs:
           test "$(xcrun vtool -show-build "$BIN" | awk '/minos/{print $2}')" = 14.0
           otool -L "$BIN"
           otool -L "$BIN" | awk 'NR > 1 && $1 !~ /^\/(usr\/lib|System\/Library\/Frameworks)\// && $1 !~ /^@rpath\/Qt(Core|Gui|Widgets)\.framework\/Versions\/A\/Qt(Core|Gui|Widgets)$/ {exit 1}'
+          if [ -f "$bundle/Contents/MacOS/obs-streamtranslate-updater" ]; then
+            codesign --force --sign - "$bundle/Contents/MacOS/obs-streamtranslate-updater"
+          fi
           codesign --force --sign - "$bundle"
           codesign --verify --strict "$bundle"
       - name: Build branded .pkg installer
@@ -143,7 +159,13 @@ jobs:
             --scripts pkg-scripts \
             --install-location "/" \
             component.pkg
-          productbuild --distribution installer/distribution.xml \
+          distribution=installer/distribution.xml
+          if [ -n "$ST_UPDATE_PUBLIC_KEY" ]; then
+            pkgbuild --nopayload --identifier live.streamtranslate.obs-plugin.auto-updates \
+              --version 1 --scripts installer/auto-updates auto-updates.pkg
+            distribution=installer/distribution-auto-updates.xml
+          fi
+          productbuild --distribution "$distribution" \
             --resources installer \
             --package-path . \
             out/StreamTranslate-OBS-Plugin.pkg
@@ -155,8 +177,16 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    env:
+      ST_UPDATE_PUBLIC_KEY: ${{ vars.ST_UPDATE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: updater/go.sum
+      - name: Test the desktop updater
+        run: go -C updater test ./...
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -217,7 +247,7 @@ jobs:
       - name: Compile plugin DLL
         shell: cmd
         run: |
-          clang-cl /nologo /O2 /MT /std:c17 /LD plugin.c ^
+          clang-cl /nologo /O2 /MT /std:c17 /LD /DST_DESKTOP_UPDATER plugin.c ^
             /I obs-studio\libobs /I genhdr ^
             /I %VCPKG_INSTALLATION_ROOT%\installed\x64-windows-static\include ^
             /Fe:obs-streamtranslate.dll ^
@@ -247,7 +277,15 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile cacert.pem
-          python scripts/package-windows.py --dll obs-streamtranslate.dll --certificates cacert.pem --output dist
+          $updater = @()
+          if ($env:ST_UPDATE_PUBLIC_KEY) {
+            if ($env:ST_UPDATE_PUBLIC_KEY -cnotmatch '^[A-Za-z0-9+/]{43}=$') { throw 'Invalid desktop update public key' }
+            $env:GOARCH = "amd64"
+            go -C updater build -trimpath -ldflags "-X main.publicKey=$env:ST_UPDATE_PUBLIC_KEY" -o "$PWD\obs-streamtranslate-updater.exe" .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $updater = @("--updater", "obs-streamtranslate-updater.exe")
+          }
+          python scripts/package-windows.py --dll obs-streamtranslate.dll --certificates cacert.pem --output dist @updater
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload artifact
         uses: actions/upload-artifact@v4

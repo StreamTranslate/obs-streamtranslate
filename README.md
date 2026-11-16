@@ -39,7 +39,7 @@ Filter = the microphone. Browser source = the screen.
 The filter properties show the installed plugin version, a **Check for updates**
 button and a link to the official downloads/release notes. A newer stable release
 shows an **Update available** notice. Install updates only when not streaming,
-then restart OBS. This does not automatically install or restart anything.
+then restart OBS. The update notice by itself downloads release metadata only.
 
 The check reads public GitHub release metadata once when OBS loads the plugin.
 Manual checks share a 15-minute cooldown across filters. It runs separately from
@@ -57,6 +57,16 @@ package). If unavailable, captions still work and the downloads link remains.
 Older installed versions cannot acquire this UI remotely: users must install
 the new plugin once. Cloud OBS users without a browser can copy this URL to their
 own device: https://github.com/StreamTranslate/obs-streamtranslate/releases/latest.
+
+## Automatic desktop updates
+
+Builds configured for automatic updates offer an unchecked option in the macOS installer. Windows users with the standard dedicated plugin directory can turn the feature on in the filter under **More settings**. Either platform can turn it off there.
+
+The helper verifies a signed desktop update manifest, downloads the matching archive, and waits for OBS to close before replacing the plugin. The previous version is kept in `.streamtranslate-previous` beside the current plugin. For a manual rollback, turn automatic updates off in the filter, close OBS, and replace the plugin with the saved version, restoring the original file or directory name.
+
+System-managed or shared legacy plugin directories can continue to use the normal manual installation procedure. The portable OBS 32 ZIP uses that procedure.
+
+For release maintainers, set the build variable `ST_UPDATE_PUBLIC_KEY` to the base64 raw 32-byte Ed25519 public key. Keep the private key in the release signing environment. With the notarized macOS installer and compatible Windows ZIP built from the same version, run `python3 scripts/prepare-desktop-update.py --help` for the asset generation command. Upload the generated archives, JSON manifest, and detached signature to the same release before promoting it to Latest. Keep the public key stable across builds so existing installations can authenticate new releases.
 
 ## Install
 

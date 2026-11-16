@@ -5,7 +5,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-def package_windows(dll, certificates, output):
+def package_windows(dll, certificates, output, updater=None):
     dll = Path(dll)
     certificates = Path(certificates)
     # Read before creating output, so missing inputs cannot leave a partial ZIP.
@@ -19,6 +19,10 @@ def package_windows(dll, certificates, output):
     output.mkdir(parents=True, exist_ok=True)
     module = 'obs-streamtranslate'
     files = {module + '.dll': binary, 'cacert.pem': certificate_data}
+    if updater:
+        updater_data = Path(updater).read_bytes()
+        if not updater_data.startswith(b'MZ'):
+            raise ValueError('Expected a Windows updater executable')
     repo = Path(__file__).resolve().parents[1]
     licenses = [repo / 'LICENSE-libcaption.txt', repo / 'third-party/libwebsockets-LICENSE.txt']
     modern = output / 'StreamTranslate-OBS-Plugin-Windows.zip'
@@ -32,6 +36,10 @@ def package_windows(dll, certificates, output):
             # OBS 33 loads the modern module first and skips its legacy duplicate.
             archive.writestr(f'{module}/{name}', content)
             archive.writestr(f'{module}/bin/64bit/{name}', content)
+        if updater:
+            # Both dedicated layouts can start the updater beside their loaded DLL.
+            archive.writestr(f'{module}/obs-streamtranslate-updater.exe', updater_data)
+            archive.writestr(f'{module}/bin/64bit/obs-streamtranslate-updater.exe', updater_data)
     with ZipFile(legacy, 'w', compression=ZIP_DEFLATED) as archive:
         for license_file in licenses:
             archive.writestr(license_file.name, license_file.read_bytes())
@@ -45,6 +53,7 @@ if __name__ == '__main__':
     parser.add_argument('--dll', required=True)
     parser.add_argument('--certificates', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--updater')
     args = parser.parse_args()
-    for path in package_windows(args.dll, args.certificates, args.output):
+    for path in package_windows(args.dll, args.certificates, args.output, args.updater):
         print(path)
