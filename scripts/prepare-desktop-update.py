@@ -62,7 +62,9 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--mac-pkg', required=True, type=Path)
     parser.add_argument('--windows-zip', required=True, type=Path)
-    parser.add_argument('--signing-key', required=True, type=Path, help='Ed25519 private key PEM')
+    signing = parser.add_mutually_exclusive_group(required=True)
+    signing.add_argument('--signing-key', type=Path, help='Ed25519 private key PEM')
+    signing.add_argument('--signer', type=Path, help='Executable with public-key and sign PATH commands')
     parser.add_argument('--output', required=True, type=Path, help='New directory for the four assets')
     args = parser.parse_args()
     if not re.fullmatch(r'(0|[1-9][0-9]{0,5})(\.(0|[1-9][0-9]{0,5})){2}', args.version):
@@ -71,13 +73,17 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.exists():
         parser.error('output directory already exists')
-    public_der = subprocess.check_output([
-        'openssl', 'pkey', '-in', args.signing_key, '-pubout', '-outform', 'DER',
-    ])
     ed25519_prefix = bytes.fromhex('302a300506032b6570032100')
+    if args.signer:
+        public_key = subprocess.check_output([args.signer, 'public-key']).strip()
+        public_der = ed25519_prefix + base64.b64decode(public_key, validate=True)
+    else:
+        public_der = subprocess.check_output([
+            'openssl', 'pkey', '-in', args.signing_key, '-pubout', '-outform', 'DER',
+        ])
+        public_key = base64.b64encode(public_der[len(ed25519_prefix):])
     if not public_der.startswith(ed25519_prefix) or len(public_der) != len(ed25519_prefix) + 32:
         parser.error('expected an Ed25519 signing key')
-    public_key = base64.b64encode(public_der[len(ed25519_prefix):])
 
     with tempfile.TemporaryDirectory(dir=args.output.parent) as scratch:
         stage = Path(scratch) / 'assets'
@@ -93,11 +99,23 @@ def main():
                 }
         manifest = stage / 'obs-update.json'
         manifest.write_text(json.dumps({'version': args.version, 'assets': assets}) + '\n')
-        signature = subprocess.check_output([
-            'openssl', 'pkeyutl', '-sign', '-rawin', '-inkey', args.signing_key, '-in', manifest,
-        ])
+        if args.signer:
+            encoded = subprocess.check_output([args.signer, 'sign', manifest]).strip()
+            signature = base64.b64decode(encoded, validate=True)
+        else:
+            signature = subprocess.check_output([
+                'openssl', 'pkeyutl', '-sign', '-rawin', '-inkey', args.signing_key, '-in', manifest,
+            ])
         if len(signature) != 64:
             raise ValueError('expected an Ed25519 signature')
+        verification_key = Path(scratch) / 'public-key.der'
+        verification_key.write_bytes(public_der)
+        signature_file = Path(scratch) / 'manifest.sig'
+        signature_file.write_bytes(signature)
+        subprocess.run([
+            'openssl', 'pkeyutl', '-verify', '-pubin', '-keyform', 'DER', '-rawin',
+            '-inkey', verification_key, '-in', manifest, '-sigfile', signature_file,
+        ], check=True)
         (stage / 'obs-update.sig').write_bytes(base64.b64encode(signature) + b'\n')
         stage.rename(args.output)
 

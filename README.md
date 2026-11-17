@@ -66,7 +66,7 @@ The helper verifies a signed desktop update manifest, downloads the matching arc
 
 System-managed or shared legacy plugin directories can continue to use the normal manual installation procedure. The portable OBS 32 ZIP uses that procedure.
 
-For release maintainers, set the build variable `ST_UPDATE_PUBLIC_KEY` to the base64 raw 32-byte Ed25519 public key. Keep the private key in the release signing environment. With the notarized macOS installer and compatible Windows ZIP built from the same version, run `python3 scripts/prepare-desktop-update.py --help` for the asset generation command. Upload the generated archives, JSON manifest, and detached signature to the same release before promoting it to Latest. Keep the public key stable across builds so existing installations can authenticate new releases.
+For release maintainers, set the build variable `ST_UPDATE_PUBLIC_KEY` to the base64 raw 32-byte Ed25519 public key. Keep the private key in the release signing environment. With the notarized macOS installer and compatible Windows ZIP built from the same version, run `python3 scripts/prepare-desktop-update.py --help` for the asset generation command. Use `--signer` with the release-signing helper to sign through macOS Keychain. Upload the generated archives, JSON manifest, and detached signature to the same release before promoting it to Latest. Keep the public key stable across builds so existing installations can authenticate new releases.
 
 ## Install
 
