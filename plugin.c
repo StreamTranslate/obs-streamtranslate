@@ -39,7 +39,7 @@ OBS_DECLARE_MODULE()
 #include "retry-policy.h"
 #include "ca-path.h"
 #define ST_PLUGIN_VERSION "two-speaker-native-cc-v1"
-#define ST_RELEASE_VERSION "0.1.16"
+#define ST_RELEASE_VERSION "0.1.19"
 #include "native-cc.h"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
