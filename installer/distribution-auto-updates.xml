@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+  <title>StreamTranslate OBS Plugin</title>
+  <welcome file="welcome.html"/>
+  <background file="background.png" alignment="bottomleft" scaling="proportional"/>
+  <options customize="always" require-scripts="false" hostArchitectures="arm64"/>
+  <choices-outline>
+    <line choice="live.streamtranslate.obs-plugin"/>
+    <line choice="live.streamtranslate.obs-plugin.auto-updates"/>
+  </choices-outline>
+  <choice id="live.streamtranslate.obs-plugin" title="StreamTranslate OBS Plugin" enabled="false" start_selected="true">
+    <pkg-ref id="live.streamtranslate.obs-plugin"/>
+  </choice>
+  <choice id="live.streamtranslate.obs-plugin.auto-updates"
+          title="Automatically install plugin updates after I quit OBS" start_selected="false"
+          description="You can change this in the StreamTranslate filter under More settings.">
+    <pkg-ref id="live.streamtranslate.obs-plugin.auto-updates"/>
+  </choice>
+  <pkg-ref id="live.streamtranslate.obs-plugin" onConclusion="none">component.pkg</pkg-ref>
+  <pkg-ref id="live.streamtranslate.obs-plugin.auto-updates" onConclusion="none">auto-updates.pkg</pkg-ref>
+</installer-gui-script>

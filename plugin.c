@@ -17,6 +17,7 @@
 #include <media-io/audio-resampler.h>
 #include <media-io/audio-io.h>
 #include <util/platform.h>
+#include <util/dstr.h>
 #include <util/threading.h>
 #include <libwebsockets.h>
 #include <stdlib.h>
@@ -38,7 +39,7 @@ OBS_DECLARE_MODULE()
 #include "retry-policy.h"
 #include "ca-path.h"
 #define ST_PLUGIN_VERSION "two-speaker-native-cc-v1"
-#define ST_RELEASE_VERSION "0.1.16"
+#define ST_RELEASE_VERSION "0.1.19"
 #include "native-cc.h"
 #ifdef _WIN32
 #define ST_PLATFORM "windows"
@@ -617,6 +618,7 @@ void st_compact_ui_stop(void);
 #include "update-check.h"
 #endif
 #include "connection-test.h"
+#include "desktop-updates.h"
 
 static void st_service_pulse(lws_sorted_usec_list_t *sul)
 {
@@ -1114,6 +1116,9 @@ static obs_properties_t *st_get_properties(void *data)
     obs_properties_add_bool(advanced, "native_twitch_cc", "Enable native Twitch CC");
     obs_properties_add_text(advanced, "native_help",
         "Optional Twitch CC button. Set language in Control. Change before streaming.", OBS_TEXT_INFO);
+#ifdef ST_DESKTOP_UPDATER
+    st_auto_properties(advanced);
+#endif
     obs_properties_add_group(props, "more_settings", "More settings", OBS_GROUP_NORMAL, advanced);
 
     obs_data_t *settings = f ? obs_source_get_settings(f->context) : obs_data_create();
@@ -1178,6 +1183,9 @@ bool obs_module_load(void)
 #else
     st_updates_start();
 #endif
+#ifdef ST_DESKTOP_UPDATER
+    st_auto_start();
+#endif
 	obs_register_source(&st_filter_info);
 	blog(LOG_INFO, "[streamtranslate] plugin loaded");
 	return true;
@@ -1185,6 +1193,9 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+#ifdef ST_DESKTOP_UPDATER
+    st_auto_shutdown();
+#endif
 #ifdef ST_OBS_COMPACT_UI
     st_compact_ui_stop();
 #else
